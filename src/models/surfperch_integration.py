@@ -3,12 +3,21 @@ SurfPerch model integration for Acoustic Reef
 Handles loading and using the Google SurfPerch model for audio embeddings
 """
 
-import tensorflow as tf
-import numpy as np
 import logging
-from typing import Tuple, Optional, Dict, Any
 import os
 from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+import numpy as np
+
+# TensorFlow is optional at runtime. If unavailable, we fall back to a
+# lightweight placeholder so the app can still run in demo mode.
+try:
+    import tensorflow as tf  # type: ignore
+    TF_AVAILABLE = True
+except Exception:  # pragma: no cover - environment-dependent
+    tf = None  # type: ignore
+    TF_AVAILABLE = False
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -38,19 +47,23 @@ class SurfPerchModel:
             True if model loaded successfully, False otherwise
         """
         try:
-            if self.model_path and os.path.exists(self.model_path):
-                # Load from local path
-                self.model = tf.saved_model.load(self.model_path)
+            if self.model_path and os.path.exists(self.model_path) and TF_AVAILABLE:
+                # Load from local path using TensorFlow SavedModel
+                self.model = tf.saved_model.load(self.model_path)  # type: ignore[attr-defined]
                 logger.info(f"SurfPerch model loaded from {self.model_path}")
             else:
-                # For now, create a placeholder model
-                # In production, this would load the actual SurfPerch model from Kaggle
-                logger.warning("SurfPerch model not found. Using placeholder model.")
+                if self.model_path and not os.path.exists(self.model_path):
+                    logger.warning(
+                        f"SurfPerch model path does not exist: {self.model_path}. Falling back to placeholder model."
+                    )
+                if not TF_AVAILABLE:
+                    logger.warning("TensorFlow not available. Using placeholder SurfPerch model.")
+                # Create a placeholder model that returns random embeddings
                 self.model = self._create_placeholder_model()
-            
+
             self.is_loaded = True
             return True
-            
+
         except Exception as e:
             logger.error(f"Error loading SurfPerch model: {e}")
             return False
@@ -61,11 +74,18 @@ class SurfPerchModel:
         In production, this would be replaced with actual SurfPerch model
         """
         class PlaceholderModel:
-            def __call__(self, audio_input):
-                # Placeholder: return random embeddings
-                batch_size = tf.shape(audio_input)[0]
-                embedding_dim = 512  # Typical SurfPerch embedding dimension
-                return tf.random.normal([batch_size, embedding_dim])
+            def __call__(self, audio_input: np.ndarray):
+                # Accepts numpy arrays with shape [batch, time]
+                if hasattr(audio_input, "shape"):
+                    batch_size = audio_input.shape[0] if audio_input.ndim >= 2 else 1
+                else:
+                    batch_size = 1
+                embedding_dim = 512
+                if TF_AVAILABLE:
+                    # Produce a TensorFlow tensor for consistent downstream behavior
+                    return tf.random.normal([batch_size, embedding_dim])  # type: ignore[attr-defined]
+                # Pure numpy fallback
+                return np.random.normal(size=(batch_size, embedding_dim)).astype(np.float32)
         
         return PlaceholderModel()
     
@@ -85,27 +105,33 @@ class SurfPerchModel:
                 raise RuntimeError("SurfPerch model not loaded")
         
         try:
-            # Ensure audio is in the correct format
-            if len(audio_data.shape) == 1:
-                # Add batch dimension
+            # Ensure audio is [batch, time]
+            if audio_data.ndim == 1:
                 audio_data = np.expand_dims(audio_data, axis=0)
-            
-            # Convert to tensor
-            audio_tensor = tf.constant(audio_data, dtype=tf.float32)
-            
-            # Generate embeddings
-            embeddings = self.model(audio_tensor)
-            
-            # Convert back to numpy
-            if isinstance(embeddings, tf.Tensor):
-                embeddings = embeddings.numpy()
-            
-            logger.info(f"Generated embeddings: {embeddings.shape}")
-            return embeddings
-            
+
+            if TF_AVAILABLE and self._is_tf_model(self.model):
+                audio_tensor = tf.constant(audio_data, dtype=tf.float32)  # type: ignore[name-defined]
+                embeddings = self.model(audio_tensor)
+                if hasattr(embeddings, "numpy"):
+                    embeddings = embeddings.numpy()
+            else:
+                # Placeholder or numpy-compatible path
+                embeddings = self.model(audio_data)
+
+            logger.info(f"Generated embeddings: {np.shape(embeddings)}")
+            return np.asarray(embeddings)
+
         except Exception as e:
             logger.error(f"Error generating embeddings: {e}")
             raise
+
+    @staticmethod
+    def _is_tf_model(model: Any) -> bool:
+        """Best-effort check if the loaded model is a TF callable."""
+        if not TF_AVAILABLE:
+            return False
+        # SavedModel callables expose .signatures or are callable with tensors
+        return hasattr(model, "signatures") or callable(model)
     
     def preprocess_audio(self, audio_data: np.ndarray, sample_rate: int) -> np.ndarray:
         """
@@ -122,20 +148,28 @@ class SurfPerchModel:
             # Resample if necessary (SurfPerch typically expects 22.05kHz)
             target_sr = 22050
             if sample_rate != target_sr:
-                import librosa
-                audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=target_sr)
-            
-            # Normalize audio
-            audio_data = audio_data / np.max(np.abs(audio_data))
-            
+                try:
+                    import librosa  # type: ignore
+                    audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=target_sr)
+                except Exception:
+                    # If librosa is not available, skip resampling with a warning.
+                    logger.warning(
+                        "librosa not available for resampling; proceeding without resample. Results may vary."
+                    )
+                    target_sr = sample_rate
+
+            # Normalize audio safely
+            max_abs = np.max(np.abs(audio_data)) if np.size(audio_data) > 0 else 1.0
+            if max_abs > 0:
+                audio_data = audio_data / max_abs
+
             # Ensure minimum length (SurfPerch expects certain minimum duration)
             min_length = int(target_sr * 1.0)  # 1 second minimum
             if len(audio_data) < min_length:
-                # Pad with zeros
-                audio_data = np.pad(audio_data, (0, min_length - len(audio_data)), mode='constant')
-            
+                audio_data = np.pad(audio_data, (0, min_length - len(audio_data)), mode="constant")
+
             return audio_data
-            
+
         except Exception as e:
             logger.error(f"Error preprocessing audio: {e}")
             raise

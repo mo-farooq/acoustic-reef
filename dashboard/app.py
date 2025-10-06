@@ -6,12 +6,17 @@ AI-powered stethoscope for the ocean
 import streamlit as st
 import numpy as np
 import pandas as pd
-import librosa
-import matplotlib.pyplot as plt
-import seaborn as sns
+# import librosa  # Commented out for now due to installation issues
+# import matplotlib.pyplot as plt  # Commented out for now due to installation issues
+# import seaborn as sns  # Commented out for now due to installation issues
 from pathlib import Path
 import tempfile
 import os
+import wave
+import contextlib
+
+from src.models.surfperch_integration import SurfPerchModel
+from src.utils.config import SURFPERCH_SETTINGS
 
 # Page configuration
 st.set_page_config(
@@ -176,111 +181,75 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
         tmp_path = tmp_file.name
     
     try:
-        # Load audio
-        with st.spinner("Loading audio..."):
-            audio, sr = librosa.load(tmp_path, sr=sample_rate)
-            
-            # Limit duration
-            max_samples = int(duration_limit * sr)
-            if len(audio) > max_samples:
-                audio = audio[:max_samples]
-        
+        # Basic WAV metadata without external deps
+        with contextlib.closing(wave.open(tmp_path, 'rb')) as wf:
+            n_channels = wf.getnchannels()
+            sr = wf.getframerate()
+            n_frames = wf.getnframes()
+            duration_sec = n_frames / float(sr) if sr else 0.0
+
         # Display audio info
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("Duration", f"{len(audio)/sr:.1f}s")
+            st.metric("Duration", f"{duration_sec:.1f}s")
         with col2:
             st.metric("Sample Rate", f"{sr:,} Hz")
         with col3:
-            st.metric("Channels", "Mono")
+            st.metric("Channels", "Mono" if n_channels == 1 else f"{n_channels} ch")
         with col4:
-            st.metric("RMS Level", f"{np.sqrt(np.mean(audio**2)):.3f}")
-        
-        # Audio visualization
-        st.markdown("### 📊 Audio Waveform")
-        fig, ax = plt.subplots(figsize=(12, 4))
-        time_axis = np.linspace(0, len(audio)/sr, len(audio))
-        ax.plot(time_axis, audio, alpha=0.7, color='#1f77b4')
-        ax.set_xlabel('Time (seconds)')
-        ax.set_ylabel('Amplitude')
-        ax.set_title('Audio Waveform')
-        ax.grid(True, alpha=0.3)
-        st.pyplot(fig)
-        
-        # Spectrogram
-        st.markdown("### 🎵 Spectrogram")
-        with st.spinner("Generating spectrogram..."):
-            D = librosa.amplitude_to_db(np.abs(librosa.stft(audio)), ref=np.max)
-            fig, ax = plt.subplots(figsize=(12, 6))
-            img = librosa.display.specshow(D, y_axis='hz', x_axis='time', sr=sr, ax=ax)
-            ax.set_title('Spectrogram')
-            ax.set_ylabel('Frequency (Hz)')
-            ax.set_xlabel('Time (seconds)')
-            plt.colorbar(img, ax=ax, format='%+2.0f dB')
-            st.pyplot(fig)
-        
-        # Mock AI Analysis (placeholder for actual model)
+            st.metric("RMS Level", "—")
+
+        # Read PCM samples to numpy for embedding
+        with contextlib.closing(wave.open(tmp_path, 'rb')) as wf:
+            raw_bytes = wf.readframes(n_frames)
+            sample_width = wf.getsampwidth()
+            dtype = {1: np.int8, 2: np.int16, 3: np.int32, 4: np.int32}.get(sample_width, np.int16)
+            audio_np = np.frombuffer(raw_bytes, dtype=dtype)
+            if n_channels > 1:
+                audio_np = audio_np.reshape(-1, n_channels).mean(axis=1)
+            # Normalize to float32 -1..1
+            max_val = np.max(np.abs(audio_np)) or 1
+            audio_np = (audio_np.astype(np.float32) / max_val).astype(np.float32)
+
+        # Initialize SurfPerch
+        sp_model_path = str(SURFPERCH_SETTINGS["model_path"])  # default location
+        surfperch = SurfPerchModel(model_path=sp_model_path)
+
+        # Preprocess and embed
+        processed = surfperch.preprocess_audio(audio_np, sr)
+        embeddings = surfperch.generate_embeddings(processed, 22050)
+
+        st.success(f"Generated embeddings shape: {embeddings.shape}")
+
+        # Demo: derive mock metrics from embeddings statistics
+        emb_mean = float(np.mean(embeddings))
+        emb_var = float(np.var(embeddings))
+
         st.markdown("### 🤖 AI Analysis Results")
-        
-        with st.spinner("Running AI analysis..."):
-            # This is where the actual SurfPerch + scikit-learn model would be called
-            # For now, we'll show mock results
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("#### 🏥 Reef Health Assessment")
-                health_score = np.random.uniform(0.6, 0.95)  # Mock score
-                health_status = "Healthy" if health_score > 0.7 else "Degraded"
-                health_color = "status-healthy" if health_status == "Healthy" else "status-degraded"
-                
-                st.markdown(f'<p class="{health_color}">Status: {health_status}</p>', unsafe_allow_html=True)
-                st.metric("Confidence", f"{health_score:.1%}")
-                
-                # Health indicators
-                st.markdown("**Key Indicators:**")
-                st.markdown(f"- Biodiversity Score: {np.random.uniform(0.5, 0.9):.1%}")
-                st.markdown(f"- Fish Activity: {np.random.uniform(0.3, 0.8):.1%}")
-                st.markdown(f"- Coral Health: {np.random.uniform(0.4, 0.9):.1%}")
-            
-            with col2:
-                st.markdown("#### 🔊 Anthrophony Detection")
-                anthro_score = np.random.uniform(0.1, 0.4)  # Mock score
-                anthro_status = "High" if anthro_score > 0.3 else "Low"
-                anthro_color = "status-degraded" if anthro_status == "High" else "status-healthy"
-                
-                st.markdown(f'<p class="{anthro_color}">Human Noise: {anthro_status}</p>', unsafe_allow_html=True)
-                st.metric("Detection Level", f"{anthro_score:.1%}")
-                
-                # Noise indicators
-                st.markdown("**Noise Sources:**")
-                st.markdown(f"- Boat Traffic: {np.random.uniform(0.0, 0.3):.1%}")
-                st.markdown(f"- Construction: {np.random.uniform(0.0, 0.2):.1%}")
-                st.markdown(f"- Diving Activity: {np.random.uniform(0.0, 0.4):.1%}")
-        
-        # Summary report
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("#### 🏥 Reef Health Assessment")
+            health_score = 0.5 + 0.5 * (np.tanh(emb_mean))
+            health_status = "Healthy" if health_score > 0.7 else "Degraded"
+            health_color = "status-healthy" if health_status == "Healthy" else "status-degraded"
+            st.markdown(f'<p class="{health_color}">Status: {health_status}</p>', unsafe_allow_html=True)
+            st.metric("Confidence", f"{health_score:.1%}")
+        with col2:
+            st.markdown("#### 🔊 Anthrophony Detection")
+            anthro_score = min(0.95, max(0.05, emb_var / (emb_var + 1)))
+            anthro_status = "High" if anthro_score > 0.3 else "Low"
+            anthro_color = "status-degraded" if anthro_status == "High" else "status-healthy"
+            st.markdown(f'<p class="{anthro_color}">Human Noise: {anthro_status}</p>', unsafe_allow_html=True)
+            st.metric("Detection Level", f"{anthro_score:.1%}")
+
+        # Summary table
         st.markdown("### 📋 Reef Vital Signs Report")
-        
-        report_data = {
-            'Metric': ['Overall Health', 'Biodiversity', 'Fish Activity', 'Coral Health', 'Human Impact'],
-            'Score': [f"{health_score:.1%}", f"{np.random.uniform(0.5, 0.9):.1%}", 
-                     f"{np.random.uniform(0.3, 0.8):.1%}", f"{np.random.uniform(0.4, 0.9):.1%}", 
-                     f"{anthro_score:.1%}"],
-            'Status': [health_status, 'Good', 'Moderate', 'Good', anthro_status]
-        }
-        
-        df = pd.DataFrame(report_data)
+        df = pd.DataFrame({
+            'Metric': ['Overall Health', 'Embedding Mean', 'Embedding Variance', 'Human Impact'],
+            'Score': [f"{health_score:.1%}", f"{emb_mean:.3f}", f"{emb_var:.3f}", f"{anthro_score:.1%}"],
+            'Status': [health_status, '—', '—', anthro_status]
+        })
         st.dataframe(df, use_container_width=True)
-        
-        # Recommendations
-        st.markdown("### 💡 Recommendations")
-        if health_status == "Healthy":
-            st.success("🎉 Great news! Your reef appears to be in good health. Continue monitoring regularly.")
-        else:
-            st.warning("⚠️ The reef shows signs of degradation. Consider conservation measures and regular monitoring.")
-        
-        if anthro_status == "High":
-            st.info("🔇 High human noise detected. Consider reducing boat traffic and human activity in the area.")
         
     except Exception as e:
         st.error(f"Error processing audio: {str(e)}")
