@@ -223,45 +223,76 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
             max_val = np.max(np.abs(audio_np)) or 1
             audio_np = (audio_np.astype(np.float32) / max_val).astype(np.float32)
 
-        # Initialize SurfPerch
-        sp_model_path = str(SURFPERCH_SETTINGS["model_path"])  # default location
-        surfperch = SurfPerchModel(model_path=sp_model_path)
+        # Try to use precomputed embeddings for the uploaded file (for real predictions)
+        file_basename = os.path.basename(getattr(uploaded_file, 'name', ''))
+        X_pre, emb_df = load_embeddings_from_csv()
+        matched_row = None
+        if file_basename:
+            candidate_cols = [c for c in emb_df.columns if emb_df[c].dtype == object]
+            for c in candidate_cols:
+                try:
+                    hits = emb_df[emb_df[c].astype(str).str.contains(file_basename, case=False, na=False)]
+                    if len(hits) > 0:
+                        matched_row = hits.iloc[0]
+                        break
+                except Exception:
+                    continue
 
-        # Preprocess and embed
-        processed = surfperch.preprocess_audio(audio_np, sr)
-        embeddings = surfperch.generate_embeddings(processed, 22050)
+        if matched_row is not None:
+            # Use numeric features from matched row
+            feature_vals = matched_row.select_dtypes(include=[np.number]).to_numpy(dtype=np.float32).reshape(1, -1)
+            source = f"precomputed embeddings match for '{file_basename}'"
+        else:
+            # Fallback: compute embeddings now (requires TF for real results)
+            sp_model_path = str(SURFPERCH_SETTINGS["model_path"])  # default location
+            surfperch = SurfPerchModel(model_path=sp_model_path)
+            processed = surfperch.preprocess_audio(audio_np, sr)
+            feature_vals = surfperch.generate_embeddings(processed, 22050)
+            source = "runtime-generated embeddings"
 
-        st.success(f"Generated embeddings shape: {embeddings.shape}")
+        st.success(f"Using {source}; features shape: {feature_vals.shape}")
 
-        # Demo: derive mock metrics from embeddings statistics
-        emb_mean = float(np.mean(embeddings))
-        emb_var = float(np.var(embeddings))
+        # Load trained model and predict
+        rf_model = load_trained_rf_model()
+        preds, probs = predict_with_model(rf_model, feature_vals)
 
+        # Display predictions
         st.markdown("### 🤖 AI Analysis Results")
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("#### 🏥 Reef Health Assessment")
-            health_score = 0.5 + 0.5 * (np.tanh(emb_mean))
-            health_status = "Healthy" if health_score > 0.7 else "Degraded"
-            health_color = "status-healthy" if health_status == "Healthy" else "status-degraded"
+            label_map = {0: "Degraded", 1: "Healthy"}
+            pred_label = label_map.get(int(preds[0])) if len(np.unique(preds)) <= 2 else str(preds[0])
+            health_status = pred_label
+            health_color = "status-healthy" if pred_label == "Healthy" else "status-degraded"
             st.markdown(f'<p class="{health_color}">Status: {health_status}</p>', unsafe_allow_html=True)
-            st.metric("Confidence", f"{health_score:.1%}")
+            if probs is not None:
+                try:
+                    conf = float(np.max(probs[0]))
+                    st.metric("Confidence", f"{conf:.1%}")
+                except Exception:
+                    st.metric("Confidence", "—")
+            else:
+                st.metric("Confidence", "—")
         with col2:
             st.markdown("#### 🔊 Anthrophony Detection")
-            anthro_score = min(0.95, max(0.05, emb_var / (emb_var + 1)))
-            anthro_status = "High" if anthro_score > 0.3 else "Low"
-            anthro_color = "status-degraded" if anthro_status == "High" else "status-healthy"
-            st.markdown(f'<p class="{anthro_color}">Human Noise: {anthro_status}</p>', unsafe_allow_html=True)
-            st.metric("Detection Level", f"{anthro_score:.1%}")
+            st.caption("Single-output RF model shown; anthrophony requires a dedicated head or label column in the dataset.")
+            st.metric("Detection", "—")
 
         # Summary table
-        st.markdown("### 📋 Reef Vital Signs Report")
-        df = pd.DataFrame({
-            'Metric': ['Overall Health', 'Embedding Mean', 'Embedding Variance', 'Human Impact'],
-            'Score': [f"{health_score:.1%}", f"{emb_mean:.3f}", f"{emb_var:.3f}", f"{anthro_score:.1%}"],
-            'Status': [health_status, '—', '—', anthro_status]
+        st.markdown("### 📋 Prediction Details")
+        details_df = pd.DataFrame({
+            'Metric': ['Prediction Source', 'Feature Dimension'],
+            'Value': [source, f"{feature_vals.shape[1]}"]
         })
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(details_df, width='stretch')
+
+        # If we used runtime-generated embeddings while TF is unavailable, warn user
+        try:
+            import tensorflow as _tf  # noqa: F401
+        except Exception:
+            if matched_row is None:
+                st.warning("TensorFlow is not available; runtime embeddings may be placeholders. Upload a clip present in your dataset to use precomputed embeddings, or enable TensorFlow for real-time embeddings.")
         
     except Exception as e:
         st.error(f"Error processing audio: {str(e)}")
@@ -325,7 +356,7 @@ def show_batch_predictions():
                 filtered = filtered[filtered[c].astype(str) == v]
 
         st.markdown("### Results")
-        st.dataframe(filtered, use_container_width=True, height=480)
+        st.dataframe(filtered, width='stretch', height=480)
 
         # Download button
         csv_bytes = filtered.to_csv(index=False).encode("utf-8")

@@ -1,7 +1,6 @@
 # Core dependencies for Acoustic Reef
 # Web Dashboard
 streamlit>=1.28.0
-streamlit-audio-player>=0.0.8
 
 # AI/ML Framework
 tensorflow>=2.13.0

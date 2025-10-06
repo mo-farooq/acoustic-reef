@@ -25,6 +25,12 @@ SURFPERCH_MODEL_DIR = MODELS_DIR / "surfperch"
 SURFPERCH_TF_SAVEDMODEL_DIR = SURFPERCH_MODEL_DIR / "surfperch-tensorflow2-1-v1"
 CLASSIFIER_MODEL_DIR = MODELS_DIR / "classifiers"
 RF_MODEL_PATH = CLASSIFIER_MODEL_DIR / "reef_classifier_rf.joblib"
+HEALTH_CLASSIFIER_PATH = CLASSIFIER_MODEL_DIR / "health_classifier.joblib"
+NOISE_CLASSIFIER_PATH = CLASSIFIER_MODEL_DIR / "noise_classifier.joblib"
+
+# UMAP artifacts
+UMAP_COORDS_CSV = PROCESSED_DATA_DIR / "umap_coordinates.csv"
+UMAP_MODEL_PATH = CLASSIFIER_MODEL_DIR / "umap_model.joblib"
 
 # Audio processing settings
 AUDIO_SETTINGS = {
