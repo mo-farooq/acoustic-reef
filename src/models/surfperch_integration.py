@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
+from src.utils import config
 
 # TensorFlow is optional at runtime. If unavailable, we fall back to a
 # lightweight placeholder so the app can still run in demo mode.
@@ -35,7 +36,7 @@ class SurfPerchModel:
         Args:
             model_path: Path to saved SurfPerch model (if None, will download from Kaggle)
         """
-        self.model_path = model_path
+        self.model_path = model_path or str(config.SURFPERCH_SETTINGS.get("model_path"))
         self.model = None
         self.is_loaded = False
         
@@ -80,7 +81,7 @@ class SurfPerchModel:
                     batch_size = audio_input.shape[0] if audio_input.ndim >= 2 else 1
                 else:
                     batch_size = 1
-                embedding_dim = 512
+                embedding_dim = int(config.SURFPERCH_SETTINGS.get("embedding_dim", 512))
                 if TF_AVAILABLE:
                     # Produce a TensorFlow tensor for consistent downstream behavior
                     return tf.random.normal([batch_size, embedding_dim])  # type: ignore[attr-defined]
@@ -213,6 +214,6 @@ class SurfPerchModel:
             'is_loaded': self.is_loaded,
             'model_path': self.model_path,
             'model_type': 'SurfPerch',
-            'embedding_dim': 512,  # Typical SurfPerch embedding dimension
+            'embedding_dim': int(config.SURFPERCH_SETTINGS.get("embedding_dim", 512)),
             'target_sample_rate': 22050
         }

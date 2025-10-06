@@ -15,6 +15,7 @@ import joblib
 import logging
 from typing import Tuple, Dict, Any, Optional, List
 from pathlib import Path
+from src.utils import config
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -293,3 +294,112 @@ class ReefClassifier:
         except Exception as e:
             logger.error(f"Error getting feature importance: {e}")
             raise
+
+
+# -----------------------------
+# Kaggle artifact loader helpers
+# -----------------------------
+
+def load_embeddings_from_csv(csv_path: Optional[Path] = None) -> Tuple[np.ndarray, pd.DataFrame]:
+    """
+    Load SurfPerch embeddings from a CSV file. Returns (X, df).
+
+    - Numeric columns are treated as features
+    - Non-numeric columns are preserved in the returned DataFrame for joins
+    """
+    path = Path(csv_path) if csv_path else Path(config.EMBEDDINGS_CSV)
+    logger.info(f"Loading embeddings from {path}")
+    df = pd.read_csv(path)
+    feature_df = df.select_dtypes(include=[np.number])
+    X = feature_df.to_numpy(dtype=np.float32)
+
+    # Sanity check: embedding dimension
+    expected_dim = config.SURFPERCH_SETTINGS.get("embedding_dim", X.shape[1])
+    if X.shape[1] != expected_dim:
+        logger.warning(
+            f"Embedding dim mismatch: CSV has {X.shape[1]}, expected {expected_dim}. Proceeding anyway."
+        )
+    return X, df
+
+
+def load_master_dataset(csv_path: Optional[Path] = None) -> pd.DataFrame:
+    """Load the master dataset CSV with metadata and labels."""
+    path = Path(csv_path) if csv_path else Path(config.MASTER_DATASET_CSV)
+    logger.info(f"Loading master dataset from {path}")
+    return pd.read_csv(path)
+
+
+def align_embeddings_and_labels(
+    embeddings_df: pd.DataFrame,
+    dataset_df: pd.DataFrame,
+    key_columns: Optional[List[str]] = None,
+    label_columns: Optional[List[str]] = None,
+) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+    """
+    Align embeddings with labels by joining on key columns.
+
+    If key_columns are not provided, tries ['clip_id'] if present; otherwise falls back to positional alignment.
+    Returns (X, y, merged_df). If multiple label columns are provided, y will be a 2D array.
+    """
+    # Determine join keys
+    if key_columns is None:
+        if "clip_id" in embeddings_df.columns and "clip_id" in dataset_df.columns:
+            key_columns = ["clip_id"]
+        else:
+            key_columns = []
+
+    # Determine label columns
+    if label_columns is None:
+        # Heuristic: prefer common label names
+        candidate_labels = [
+            "health_label",
+            "reef_health",
+            "label",
+            "anthro_label",
+            "anthrophony",
+        ]
+        label_columns = [c for c in candidate_labels if c in dataset_df.columns]
+        if not label_columns:
+            # Fall back to any non-numeric columns that look categorical
+            label_columns = [
+                c for c in dataset_df.columns
+                if dataset_df[c].dtype == object and c not in key_columns
+            ][:1]
+
+    # Perform alignment
+    if key_columns:
+        merged = embeddings_df.merge(dataset_df, on=key_columns, how="inner")
+        feature_df = merged.select_dtypes(include=[np.number])
+        # Exclude label columns from features if they are numeric encoded
+        feature_df = feature_df.drop(columns=[c for c in label_columns if c in feature_df.columns], errors="ignore")
+        X = feature_df.to_numpy(dtype=np.float32)
+        y = merged[label_columns].to_numpy() if label_columns else np.array([])
+        return X, y, merged
+
+    # Positional fallback
+    logger.warning("No key columns for join; falling back to positional alignment.")
+    min_len = min(len(embeddings_df), len(dataset_df))
+    emb_feat = embeddings_df.select_dtypes(include=[np.number]).iloc[:min_len]
+    X = emb_feat.to_numpy(dtype=np.float32)
+    y = dataset_df.iloc[:min_len][label_columns].to_numpy() if label_columns else np.array([])
+    merged = pd.concat([embeddings_df.iloc[:min_len], dataset_df.iloc[:min_len].reset_index(drop=True)], axis=1)
+    return X, y, merged
+
+
+def load_trained_rf_model(model_path: Optional[Path] = None):
+    """Load the pre-trained RandomForest model (.joblib)."""
+    path = Path(model_path) if model_path else Path(config.RF_MODEL_PATH)
+    logger.info(f"Loading trained RF model from {path}")
+    return joblib.load(path)
+
+
+def predict_with_model(model, X: np.ndarray) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """Predict with a scikit-learn classifier, returning (preds, probs_or_none)."""
+    preds = model.predict(X)
+    probs = None
+    if hasattr(model, "predict_proba"):
+        try:
+            probs = model.predict_proba(X)
+        except Exception:
+            probs = None
+    return preds, probs

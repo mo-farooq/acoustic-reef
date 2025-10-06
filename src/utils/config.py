@@ -16,10 +16,15 @@ NOTEBOOKS_DIR = PROJECT_ROOT / "notebooks"
 RAW_DATA_DIR = DATA_DIR / "raw"
 PROCESSED_DATA_DIR = DATA_DIR / "processed"
 EMBEDDINGS_DIR = DATA_DIR / "embeddings"
+PROCESSED_CLIPS_DIR = PROCESSED_DATA_DIR / "clips"
+EMBEDDINGS_CSV = EMBEDDINGS_DIR / "embeddings.csv"
+MASTER_DATASET_CSV = PROCESSED_DATA_DIR / "dataset.csv"
 
 # Model paths
 SURFPERCH_MODEL_DIR = MODELS_DIR / "surfperch"
+SURFPERCH_TF_SAVEDMODEL_DIR = SURFPERCH_MODEL_DIR / "surfperch-tensorflow2-1-v1"
 CLASSIFIER_MODEL_DIR = MODELS_DIR / "classifiers"
+RF_MODEL_PATH = CLASSIFIER_MODEL_DIR / "reef_classifier_rf.joblib"
 
 # Audio processing settings
 AUDIO_SETTINGS = {
@@ -33,9 +38,9 @@ AUDIO_SETTINGS = {
 
 # SurfPerch model settings
 SURFPERCH_SETTINGS = {
-    "embedding_dim": 512,
+    "embedding_dim": 1280,  # Kaggle export embeddings
     "target_sample_rate": 22050,
-    "model_path": SURFPERCH_MODEL_DIR / "surfperch_model"
+    "model_path": SURFPERCH_TF_SAVEDMODEL_DIR
 }
 
 # Classifier settings
@@ -70,6 +75,7 @@ def create_directories():
         RAW_DATA_DIR,
         PROCESSED_DATA_DIR,
         EMBEDDINGS_DIR,
+        PROCESSED_CLIPS_DIR,
         MODELS_DIR,
         SURFPERCH_MODEL_DIR,
         CLASSIFIER_MODEL_DIR,
