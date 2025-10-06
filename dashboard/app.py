@@ -16,7 +16,14 @@ import wave
 import contextlib
 
 from src.models.surfperch_integration import SurfPerchModel
-from src.utils.config import SURFPERCH_SETTINGS
+from src.utils.config import SURFPERCH_SETTINGS, EMBEDDINGS_CSV, MASTER_DATASET_CSV, RF_MODEL_PATH
+from src.models.reef_classifier import (
+    load_embeddings_from_csv,
+    load_master_dataset,
+    align_embeddings_and_labels,
+    load_trained_rf_model,
+    predict_with_model,
+)
 
 # Page configuration
 st.set_page_config(
@@ -106,11 +113,16 @@ def main():
         3. Get instant reef health assessment
         """)
     
-    # Main content area
-    if uploaded_file is not None:
-        analyze_audio(uploaded_file, sample_rate, duration_limit)
-    else:
-        show_landing_page()
+    # Main content area with tabs
+    tabs = st.tabs(["Upload & Analyze", "Batch Predictions"])
+    with tabs[0]:
+        if uploaded_file is not None:
+            analyze_audio(uploaded_file, sample_rate, duration_limit)
+        else:
+            show_landing_page()
+
+    with tabs[1]:
+        show_batch_predictions()
 
 def show_landing_page():
     """Display the landing page when no file is uploaded"""
@@ -258,6 +270,86 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
         # Clean up temporary file
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+
+def show_batch_predictions():
+    """Load embeddings/dataset, align, run RF predictions, and display with filters/export."""
+    st.markdown('<h2 class="sub-header">📦 Batch Predictions</h2>', unsafe_allow_html=True)
+
+    # Paths
+    st.caption(f"Embeddings: {EMBEDDINGS_CSV}")
+    st.caption(f"Dataset: {MASTER_DATASET_CSV}")
+    st.caption(f"Model: {RF_MODEL_PATH}")
+
+    try:
+        with st.spinner("Loading data and model..."):
+            X_emb, emb_df = load_embeddings_from_csv()
+            dataset_df = load_master_dataset()
+            X, y, merged = align_embeddings_and_labels(emb_df, dataset_df)
+            model = load_trained_rf_model()
+            preds, probs = predict_with_model(model, X)
+
+        # Build results dataframe
+        results_df = merged.copy()
+        results_df["prediction"] = preds
+
+        # If probabilities available, add max prob
+        if isinstance(probs, list):
+            try:
+                # multi-output: use first head's max prob as preview
+                first_head = probs[0]
+                if first_head is not None:
+                    results_df["prob_max"] = np.max(first_head, axis=1)
+            except Exception:
+                pass
+        elif probs is not None:
+            try:
+                results_df["prob_max"] = np.max(probs, axis=1)
+            except Exception:
+                pass
+
+        # Sidebar-like filters in expander
+        with st.expander("Filters", expanded=False):
+            filter_cols = [c for c in results_df.columns if results_df[c].dtype == object and c != "prediction"]
+            selections = {}
+            cols = st.columns(min(3, max(1, len(filter_cols)))) if filter_cols else []
+            for i, c in enumerate(filter_cols):
+                unique_vals = ["(all)"] + sorted([str(v) for v in results_df[c].dropna().unique()])
+                with cols[i % max(1, len(cols))]:
+                    selections[c] = st.selectbox(f"{c}", unique_vals, index=0)
+
+        # Apply filters
+        filtered = results_df
+        for c, v in (selections or {}).items():
+            if v != "(all)":
+                filtered = filtered[filtered[c].astype(str) == v]
+
+        st.markdown("### Results")
+        st.dataframe(filtered, use_container_width=True, height=480)
+
+        # Download button
+        csv_bytes = filtered.to_csv(index=False).encode("utf-8")
+        st.download_button("Download CSV", data=csv_bytes, file_name="batch_predictions.csv", mime="text/csv")
+
+        # Metrics if ground-truth present
+        label_candidates = ["health_label", "reef_health", "label"]
+        gt_col = next((c for c in label_candidates if c in filtered.columns), None)
+        if gt_col is not None:
+            from sklearn.metrics import classification_report
+            st.markdown("### Quick Metrics")
+            try:
+                report = classification_report(filtered[gt_col], filtered["prediction"], output_dict=False)
+                st.text(report)
+            except Exception as e:
+                st.info(f"Could not compute metrics: {e}")
+
+        # Small summary
+        st.caption(f"Total records: {len(results_df)} | After filters: {len(filtered)} | Feature dim: {X.shape[1] if 'X' in locals() else '—'}")
+
+    except FileNotFoundError as e:
+        st.error(f"File not found: {e}")
+    except Exception as e:
+        st.error(f"Error running batch predictions: {e}")
 
 if __name__ == "__main__":
     main()
