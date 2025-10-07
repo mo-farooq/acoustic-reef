@@ -67,10 +67,8 @@ def load_umap_model():
 
 def load_umap_coordinates() -> Optional[pd.DataFrame]:
     try:
-        # Use the correct config attribute name
-        path = getattr(config, "UMAP_COORDINATES_CSV", None)
-        if path is None:
-            raise FileNotFoundError("UMAP_COORDINATES_CSV not configured")
+        # Correct attribute from config
+        path = config.UMAP_COORDS_CSV
         return pd.read_csv(path)
     except Exception as e:
         logger.warning(f"Could not load UMAP coordinates: {e}")
@@ -89,14 +87,29 @@ def find_embedding_for_filename(emb_df: pd.DataFrame, filename: str) -> Optional
     if not filename:
         return None
     try:
-        # Look for filename in filepath column
-        if 'filepath' in emb_df.columns:
-            hits = emb_df[emb_df['filepath'].astype(str).str.contains(filename, case=False, na=False)]
-            if len(hits) > 0:
-                # Extract embedding columns (embedding_0, embedding_1, etc.)
-                embedding_cols = [c for c in emb_df.columns if c.startswith('embedding_')]
-                if embedding_cols:
-                    return hits.iloc[0][embedding_cols].values.astype(np.float32)
+        if 'filepath' not in emb_df.columns:
+            return None
+        # Normalize
+        fname = str(filename).strip()
+        base = fname.rsplit('.', 1)[0].lower()
+        # Build exact-match candidates
+        filepaths = emb_df['filepath'].astype(str)
+        basenames = filepaths.apply(lambda p: p.rsplit('/', 1)[-1].rsplit('\\', 1)[-1])
+        basenames_noext = basenames.str.rsplit('.', 1).str[0].str.lower()
+
+        # 1) Exact basename match (case-sensitive)
+        exact_hits = emb_df[basenames == fname]
+        # 2) Exact basename (no extension, case-insensitive)
+        if exact_hits.empty and base:
+            exact_hits = emb_df[basenames_noext == base]
+        # 3) Fallback: substring contains (case-insensitive)
+        if exact_hits.empty:
+            exact_hits = emb_df[filepaths.str.contains(fname, case=False, na=False)]
+
+        if not exact_hits.empty:
+            embedding_cols = [c for c in emb_df.columns if c.startswith('embedding_')]
+            if embedding_cols:
+                return exact_hits.iloc[0][embedding_cols].values.astype(np.float32)
     except Exception as e:
         logger.warning(f"Error finding embedding for {filename}: {e}")
         return None

@@ -263,6 +263,19 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
             if result.noise_conf is not None:
                 st.metric("Confidence", f"{result.noise_conf:.1%}")
 
+        # Show per-class probabilities if available
+        try:
+            import joblib
+            from src.utils.config import RF_MODEL_PATH
+            model = joblib.load(RF_MODEL_PATH)
+            if hasattr(model, "predict_proba") and hasattr(model, "classes_"):
+                probs = model.predict_proba(feature_vals)[0]
+                cls_to_prob = {str(c): float(p) for c, p in zip(model.classes_, probs)}
+                st.markdown("#### Class Probabilities")
+                st.json(cls_to_prob)
+        except Exception:
+            pass
+
         # Take Action section
         if result.health_label in ("Degraded", "Stressed"):
             if st.button("Learn How to Take Action"):
