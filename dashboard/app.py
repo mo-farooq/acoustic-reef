@@ -85,6 +85,19 @@ def main():
             type=['wav', 'mp3', 'flac'],
             help="Upload a .wav file from your hydrophone recording"
         )
+
+        # Batch upload (multiple files)
+        with st.expander("Batch Upload (analyze multiple files)"):
+            batch_files = st.file_uploader(
+                "Upload multiple audio files",
+                type=['wav', 'mp3', 'flac'],
+                accept_multiple_files=True,
+                help="Drag & drop multiple files to analyze together"
+            )
+            if batch_files:
+                run_batch = st.button("Run Batch Analysis")
+            else:
+                run_batch = False
         
         st.markdown("---")
         st.markdown("### 📊 Analysis Settings")
@@ -125,7 +138,14 @@ def main():
             show_landing_page()
 
     with tabs[1]:
-        show_batch_predictions()
+        # Prefer new in-app batch upload if files provided; otherwise show dataset-based batch predictions
+        try:
+            if 'batch_files' in locals() and batch_files and 'run_batch' in locals() and run_batch:
+                run_batch_upload(batch_files)
+            else:
+                show_batch_predictions()
+        except Exception as e:
+            st.error(f"Batch analysis failed: {e}")
     with tabs[2]:
         show_acoustic_map()
 
@@ -198,83 +218,131 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
         tmp_path = tmp_file.name
     
     try:
-        # Basic WAV metadata without external deps
-        with contextlib.closing(wave.open(tmp_path, 'rb')) as wf:
-            n_channels = wf.getnchannels()
-            sr = wf.getframerate()
-            n_frames = wf.getnframes()
-            duration_sec = n_frames / float(sr) if sr else 0.0
+        with st.spinner("Processing audio and generating embeddings..."):
+            # Basic WAV metadata without external deps
+            with contextlib.closing(wave.open(tmp_path, 'rb')) as wf:
+                n_channels = wf.getnchannels()
+                sr = wf.getframerate()
+                n_frames = wf.getnframes()
+                duration_sec = n_frames / float(sr) if sr else 0.0
 
-        # Display audio info
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Duration", f"{duration_sec:.1f}s")
-        with col2:
-            st.metric("Sample Rate", f"{sr:,} Hz")
-        with col3:
-            st.metric("Channels", "Mono" if n_channels == 1 else f"{n_channels} ch")
-        with col4:
-            st.metric("RMS Level", "—")
+            # Display audio info
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Duration", f"{duration_sec:.1f}s")
+            with col2:
+                st.metric("Sample Rate", f"{sr:,} Hz")
+            with col3:
+                st.metric("Channels", "Mono" if n_channels == 1 else f"{n_channels} ch")
+            with col4:
+                st.metric("RMS Level", "—")
 
-        # Read PCM samples to numpy for embedding
-        with contextlib.closing(wave.open(tmp_path, 'rb')) as wf:
-            raw_bytes = wf.readframes(n_frames)
-            sample_width = wf.getsampwidth()
-            dtype = {1: np.int8, 2: np.int16, 3: np.int32, 4: np.int32}.get(sample_width, np.int16)
-            audio_np = np.frombuffer(raw_bytes, dtype=dtype)
-            if n_channels > 1:
-                audio_np = audio_np.reshape(-1, n_channels).mean(axis=1)
-            # Normalize to float32 -1..1
-            max_val = np.max(np.abs(audio_np)) or 1
-            audio_np = (audio_np.astype(np.float32) / max_val).astype(np.float32)
+            # Data quality warnings
+            if duration_sec < 5:
+                st.warning("Audio is very short (<5s). Results may be unreliable.")
+            if duration_sec > duration_limit:
+                st.info("Only the first segment up to the Max Duration was analyzed.")
 
-        # Resolve feature vector (precomputed vs runtime)
-        file_basename = os.path.basename(getattr(uploaded_file, 'name', ''))
-        try:
-            feature_vals, source = resolve_features_for_file(file_basename, audio_np, sr)
-        except Exception as e:
-            st.error("Analysis failed while preparing features. Please try a different audio file.")
-            return
+            # Inline audio playback
+            st.audio(tmp_path, format='audio/wav')
 
-        st.success(f"Using {source}; features shape: {feature_vals.shape}")
+            # Read PCM samples to numpy for embedding
+            with contextlib.closing(wave.open(tmp_path, 'rb')) as wf:
+                raw_bytes = wf.readframes(n_frames)
+                sample_width = wf.getsampwidth()
+                dtype = {1: np.int8, 2: np.int16, 3: np.int32, 4: np.int32}.get(sample_width, np.int16)
+                audio_np = np.frombuffer(raw_bytes, dtype=dtype)
+                if n_channels > 1:
+                    audio_np = audio_np.reshape(-1, n_channels).mean(axis=1)
+                # Normalize to float32 -1..1
+                max_val = np.max(np.abs(audio_np)) or 1
+                audio_np = (audio_np.astype(np.float32) / max_val).astype(np.float32)
 
-        # Predict vital signs (health + noise)
-        try:
-            # Use the REAL trained model - no fallbacks, no mocks
-            result = predict_with_real_model(feature_vals)
-            st.success("✅ Using REAL trained model!")
-        except Exception as e:
-            st.error("Analysis failed during prediction. Please try again later.")
-            return
+            # Simple spectrogram visualization with numpy/plotly (no librosa dependency here)
+            try:
+                import plotly.express as px
+                import numpy as _np
+                # Compute a basic magnitude spectrogram using short windows
+                win = 1024
+                hop = 512
+                num_frames = max(1, (len(audio_np) - win) // hop + 1)
+                spec = []
+                for i in range(num_frames):
+                    start = i * hop
+                    frame = audio_np[start:start+win]
+                    if len(frame) < win:
+                        frame = _np.pad(frame, (0, win - len(frame)))
+                    mag = _np.abs(_np.fft.rfft(frame))
+                    spec.append(mag)
+                spec = _np.array(spec).T  # [freq, time]
+                spec_db = 20 * _np.log10(spec + 1e-6)
+                fig_s = px.imshow(spec_db, origin='lower', color_continuous_scale='Viridis', labels=dict(color='dB'))
+                fig_s.update_layout(height=300, margin=dict(l=0,r=0,t=0,b=0))
+                st.markdown("#### Spectrogram")
+                st.plotly_chart(fig_s, use_container_width=True)
+            except Exception:
+                pass
 
-        # Vital Signs UI
-        st.markdown("### 🩺 Vital Signs")
-        col1, col2 = st.columns(2)
-        with col1:
-            color = "status-healthy" if result.health_label == "Healthy" else "status-degraded"
-            st.markdown("#### 🏥 Reef Health")
-            st.markdown(f'<p class="{color}">{result.health_label}</p>', unsafe_allow_html=True)
-            if result.health_conf is not None:
-                st.metric("Confidence", f"{result.health_conf:.1%}")
-        with col2:
-            st.markdown("#### 🔊 Noise Pollution")
-            color_n = "status-degraded" if result.noise_label == "High" else "status-healthy"
-            st.markdown(f'<p class="{color_n}">{result.noise_label}</p>', unsafe_allow_html=True)
-            if result.noise_conf is not None:
-                st.metric("Confidence", f"{result.noise_conf:.1%}")
+            # Resolve feature vector (precomputed vs runtime)
+            file_basename = os.path.basename(getattr(uploaded_file, 'name', ''))
+            try:
+                feature_vals, source = resolve_features_for_file(file_basename, audio_np, sr)
+            except Exception as e:
+                st.error("Analysis failed while preparing features. Please try a different audio file.")
+                return
 
-        # Show per-class probabilities if available
-        try:
-            import joblib
-            from src.utils.config import RF_MODEL_PATH
-            model = joblib.load(RF_MODEL_PATH)
-            if hasattr(model, "predict_proba") and hasattr(model, "classes_"):
-                probs = model.predict_proba(feature_vals)[0]
-                cls_to_prob = {str(c): float(p) for c, p in zip(model.classes_, probs)}
-                st.markdown("#### Class Probabilities")
-                st.json(cls_to_prob)
-        except Exception:
-            pass
+            st.success(f"Using {source}; features shape: {feature_vals.shape}")
+
+            # Predict vital signs (health + noise)
+            try:
+                # Use the REAL trained model - no fallbacks, no mocks
+                result = predict_with_real_model(feature_vals)
+                st.success("✅ Using REAL trained model!")
+            except Exception as e:
+                st.error("Analysis failed during prediction. Please try again later.")
+                return
+
+            # Vital Signs UI
+            st.markdown("### 🩺 Vital Signs")
+            col1, col2 = st.columns(2)
+            with col1:
+                color = "status-healthy" if result.health_label == "Healthy" else "status-degraded"
+                st.markdown("#### 🏥 Reef Health")
+                st.markdown(f'<p class="{color}">{result.health_label}</p>', unsafe_allow_html=True)
+                if result.health_conf is not None:
+                    st.metric("Confidence", f"{result.health_conf:.0%}")
+            with col2:
+                st.markdown("#### 🔊 Noise Pollution")
+                color_n = "status-degraded" if result.noise_label == "High" else "status-healthy"
+                st.markdown(f'<p class="{color_n}">{result.noise_label}</p>', unsafe_allow_html=True)
+                if result.noise_conf is not None:
+                    st.metric("Confidence", f"{result.noise_conf:.0%}")
+
+            # Show per-class probabilities if available
+            try:
+                import joblib
+                from src.utils.config import RF_MODEL_PATH
+                model = joblib.load(RF_MODEL_PATH)
+                if hasattr(model, "predict_proba") and hasattr(model, "classes_"):
+                    probs = model.predict_proba(feature_vals)[0]
+                    cls_to_prob = {str(c): float(p) for c, p in zip(model.classes_, probs)}
+                    st.markdown("#### Class Probabilities")
+                    try:
+                        import plotly.express as px
+                        prob_df = pd.DataFrame({"class": list(cls_to_prob.keys()), "probability": list(cls_to_prob.values())})
+                        fig = px.bar(prob_df, x="class", y="probability", range_y=[0,1], color="class")
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception:
+                        st.json(cls_to_prob)
+                    # Downloadable CSV for this prediction
+                    csv_bytes = pd.DataFrame([cls_to_prob]).to_csv(index=False).encode("utf-8")
+                    st.download_button("Download probabilities (CSV)", data=csv_bytes, file_name="prediction_probabilities.csv", mime="text/csv")
+            except Exception:
+                pass
+
+            # Confidence explanation
+            with st.expander("What does confidence mean?"):
+                st.write("Confidence reflects the model's estimated probability for the predicted class based on SurfPerch embeddings. Recording length, background noise, and signal quality can affect confidence.")
 
         # Take Action section
         if result.health_label in ("Degraded", "Stressed"):
@@ -381,6 +449,89 @@ def show_batch_predictions():
         st.error(f"File not found: {e}")
     except Exception as e:
         st.error(f"Error running batch predictions: {e}")
+
+
+def run_batch_upload(batch_files):
+    """Analyze multiple uploaded files and summarize results."""
+    st.markdown("### Batch Summary")
+    rows = []
+    healthy_count = 0
+    degraded_count = 0
+    error_count = 0
+
+    for f in batch_files:
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
+                tmp_file.write(f.getvalue())
+                tmp_path = tmp_file.name
+            # Minimal read
+            with contextlib.closing(wave.open(tmp_path, 'rb')) as wf:
+                n_frames = wf.getnframes()
+                sr = wf.getframerate()
+                raw_bytes = wf.readframes(n_frames)
+                sample_width = wf.getsampwidth()
+            dtype = {1: np.int8, 2: np.int16, 3: np.int32, 4: np.int32}.get(sample_width, np.int16)
+            audio_np = np.frombuffer(raw_bytes, dtype=dtype)
+            # Mono
+            try:
+                with contextlib.closing(wave.open(tmp_path, 'rb')) as wf:
+                    n_channels = wf.getnchannels()
+                if n_channels > 1:
+                    audio_np = audio_np.reshape(-1, n_channels).mean(axis=1)
+            except Exception:
+                pass
+            max_val = np.max(np.abs(audio_np)) or 1
+            audio_np = (audio_np.astype(np.float32) / max_val).astype(np.float32)
+
+            # Resolve features
+            feature_vals, _ = resolve_features_for_file(f.name, audio_np, sr)
+            # Predict
+            result = predict_with_real_model(feature_vals)
+            status = 'success'
+            health = result.health_label
+            conf = result.health_conf if result.health_conf is not None else 0.0
+            if health == 'Healthy':
+                healthy_count += 1
+            else:
+                degraded_count += 1
+            rows.append({
+                'filename': f.name,
+                'health': health,
+                'confidence': f"{conf:.0%}",
+                'noise': result.noise_label,
+                'status': status,
+            })
+        except Exception as e:
+            error_count += 1
+            rows.append({
+                'filename': getattr(f, 'name', 'unknown'),
+                'health': '—',
+                'confidence': '—',
+                'noise': '—',
+                'status': f"error: {e}",
+            })
+        finally:
+            try:
+                if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    df = pd.DataFrame(rows)
+    st.dataframe(df, use_container_width=True)
+    total = len(rows)
+    if total > 0:
+        pct_healthy = healthy_count / total
+        pct_degraded = degraded_count / total
+        st.markdown("#### Aggregates")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total", f"{total}")
+        c2.metric("Healthy", f"{pct_healthy:.0%}")
+        c3.metric("Degraded", f"{pct_degraded:.0%}")
+
+    # Download results
+    csv_bytes = df.to_csv(index=False).encode('utf-8')
+    st.download_button("Download batch results (CSV)", data=csv_bytes, file_name="batch_results.csv", mime="text/csv")
 
 
 def show_acoustic_map():
