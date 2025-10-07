@@ -111,10 +111,46 @@ class SurfPerchModel:
                 audio_data = np.expand_dims(audio_data, axis=0)
 
             if TF_AVAILABLE and self._is_tf_model(self.model):
+                # SurfPerch expects exactly 160000 samples (about 7.3 seconds at 22kHz)
+                target_length = 160000
+                if len(audio_data[0]) != target_length:
+                    # Pad or truncate to exact length
+                    if len(audio_data[0]) < target_length:
+                        # Pad with zeros
+                        padding = target_length - len(audio_data[0])
+                        audio_data = np.pad(audio_data, ((0, 0), (0, padding)), mode='constant')
+                    else:
+                        # Truncate
+                        audio_data = audio_data[:, :target_length]
+                
                 audio_tensor = tf.constant(audio_data, dtype=tf.float32)  # type: ignore[name-defined]
-                embeddings = self.model(audio_tensor)
-                if hasattr(embeddings, "numpy"):
+                
+                # Use the serving_default signature with keyword arguments
+                try:
+                    logger.info("Calling SurfPerch with serving_default signature")
+                    result = self.model.signatures["serving_default"](inputs=audio_tensor)
+                    
+                    # Extract the embedding from the result dictionary
+                    if isinstance(result, dict) and "embedding" in result:
+                        embeddings = result["embedding"]
+                        logger.info(f"Successfully extracted embedding with shape: {embeddings.shape}")
+                    else:
+                        raise RuntimeError(f"Unexpected result format: {type(result)}")
+                        
+                except Exception as e:
+                    logger.error(f"SurfPerch model call failed: {e}")
+                    raise RuntimeError(f"Could not call SurfPerch model: {e}")
+                
+                # Handle different output formats
+                if isinstance(embeddings, dict):
+                    # If it returns a dict, take the first tensor value
+                    embeddings = next(iter(embeddings.values()))
+                elif hasattr(embeddings, "numpy"):
+                    # Convert TensorFlow tensor to numpy
                     embeddings = embeddings.numpy()
+                elif not isinstance(embeddings, np.ndarray):
+                    # Try to convert to numpy array
+                    embeddings = np.array(embeddings)
             else:
                 # Placeholder or numpy-compatible path
                 embeddings = self.model(audio_data)

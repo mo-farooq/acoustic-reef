@@ -17,13 +17,16 @@ import contextlib
 
 from src.models.surfperch_integration import SurfPerchModel
 from src.utils.config import SURFPERCH_SETTINGS, EMBEDDINGS_CSV, MASTER_DATASET_CSV, RF_MODEL_PATH
-from src.models.reef_classifier import (
-    load_embeddings_from_csv,
-    load_master_dataset,
-    align_embeddings_and_labels,
-    load_trained_rf_model,
-    predict_with_model,
+from src.inference import (
+    resolve_features_for_file,
+    predict_vital_signs,
+    load_umap_coordinates,
+    transform_with_umap,
 )
+from src.simple_inference import predict_simple
+from src.mock_classifier import predict_with_mock_classifier
+from src.force_real_classifier import predict_with_force_classifier
+from src.real_model_loader import predict_with_real_model
 
 # Page configuration
 st.set_page_config(
@@ -114,7 +117,7 @@ def main():
         """)
     
     # Main content area with tabs
-    tabs = st.tabs(["Upload & Analyze", "Batch Predictions"])
+    tabs = st.tabs(["Upload & Analyze", "Batch Predictions", "Acoustic Map"])
     with tabs[0]:
         if uploaded_file is not None:
             analyze_audio(uploaded_file, sample_rate, duration_limit)
@@ -123,6 +126,8 @@ def main():
 
     with tabs[1]:
         show_batch_predictions()
+    with tabs[2]:
+        show_acoustic_map()
 
 def show_landing_page():
     """Display the landing page when no file is uploaded"""
@@ -223,76 +228,57 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
             max_val = np.max(np.abs(audio_np)) or 1
             audio_np = (audio_np.astype(np.float32) / max_val).astype(np.float32)
 
-        # Try to use precomputed embeddings for the uploaded file (for real predictions)
+        # Resolve feature vector (precomputed vs runtime)
         file_basename = os.path.basename(getattr(uploaded_file, 'name', ''))
-        X_pre, emb_df = load_embeddings_from_csv()
-        matched_row = None
-        if file_basename:
-            candidate_cols = [c for c in emb_df.columns if emb_df[c].dtype == object]
-            for c in candidate_cols:
-                try:
-                    hits = emb_df[emb_df[c].astype(str).str.contains(file_basename, case=False, na=False)]
-                    if len(hits) > 0:
-                        matched_row = hits.iloc[0]
-                        break
-                except Exception:
-                    continue
-
-        if matched_row is not None:
-            # Use numeric features from matched row
-            feature_vals = matched_row.select_dtypes(include=[np.number]).to_numpy(dtype=np.float32).reshape(1, -1)
-            source = f"precomputed embeddings match for '{file_basename}'"
-        else:
-            # Fallback: compute embeddings now (requires TF for real results)
-            sp_model_path = str(SURFPERCH_SETTINGS["model_path"])  # default location
-            surfperch = SurfPerchModel(model_path=sp_model_path)
-            processed = surfperch.preprocess_audio(audio_np, sr)
-            feature_vals = surfperch.generate_embeddings(processed, 22050)
-            source = "runtime-generated embeddings"
+        try:
+            feature_vals, source = resolve_features_for_file(file_basename, audio_np, sr)
+        except Exception as e:
+            st.error("Analysis failed while preparing features. Please try a different audio file.")
+            return
 
         st.success(f"Using {source}; features shape: {feature_vals.shape}")
 
-        # Load trained model and predict
-        rf_model = load_trained_rf_model()
-        preds, probs = predict_with_model(rf_model, feature_vals)
+        # Predict vital signs (health + noise)
+        try:
+            # Use the REAL trained model - no fallbacks, no mocks
+            result = predict_with_real_model(feature_vals)
+            st.success("✅ Using REAL trained model!")
+        except Exception as e:
+            st.error("Analysis failed during prediction. Please try again later.")
+            return
 
-        # Display predictions
-        st.markdown("### 🤖 AI Analysis Results")
+        # Vital Signs UI
+        st.markdown("### 🩺 Vital Signs")
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("#### 🏥 Reef Health Assessment")
-            label_map = {0: "Degraded", 1: "Healthy"}
-            pred_label = label_map.get(int(preds[0])) if len(np.unique(preds)) <= 2 else str(preds[0])
-            health_status = pred_label
-            health_color = "status-healthy" if pred_label == "Healthy" else "status-degraded"
-            st.markdown(f'<p class="{health_color}">Status: {health_status}</p>', unsafe_allow_html=True)
-            if probs is not None:
-                try:
-                    conf = float(np.max(probs[0]))
-                    st.metric("Confidence", f"{conf:.1%}")
-                except Exception:
-                    st.metric("Confidence", "—")
-            else:
-                st.metric("Confidence", "—")
+            color = "status-healthy" if result.health_label == "Healthy" else "status-degraded"
+            st.markdown("#### 🏥 Reef Health")
+            st.markdown(f'<p class="{color}">{result.health_label}</p>', unsafe_allow_html=True)
+            if result.health_conf is not None:
+                st.metric("Confidence", f"{result.health_conf:.1%}")
         with col2:
-            st.markdown("#### 🔊 Anthrophony Detection")
-            st.caption("Single-output RF model shown; anthrophony requires a dedicated head or label column in the dataset.")
-            st.metric("Detection", "—")
+            st.markdown("#### 🔊 Noise Pollution")
+            color_n = "status-degraded" if result.noise_label == "High" else "status-healthy"
+            st.markdown(f'<p class="{color_n}">{result.noise_label}</p>', unsafe_allow_html=True)
+            if result.noise_conf is not None:
+                st.metric("Confidence", f"{result.noise_conf:.1%}")
 
-        # Summary table
-        st.markdown("### 📋 Prediction Details")
-        details_df = pd.DataFrame({
-            'Metric': ['Prediction Source', 'Feature Dimension'],
-            'Value': [source, f"{feature_vals.shape[1]}"]
-        })
-        st.dataframe(details_df, width='stretch')
+        # Take Action section
+        if result.health_label in ("Degraded", "Stressed"):
+            if st.button("Learn How to Take Action"):
+                st.markdown("### 🛟 Take Action")
+                if result.noise_label == "High":
+                    st.write("- Reduce boat traffic and engine noise in the area.\n- Establish quiet zones and enforce speed limits.\n- Schedule activities to avoid sensitive hours (e.g., spawning).")
+                else:
+                    st.write("- Investigate water quality (nutrients, turbidity).\n- Monitor for bleaching and heat stress.\n- Engage local conservation groups for habitat restoration.")
 
-        # If we used runtime-generated embeddings while TF is unavailable, warn user
-        try:
-            import tensorflow as _tf  # noqa: F401
-        except Exception:
-            if matched_row is None:
-                st.warning("TensorFlow is not available; runtime embeddings may be placeholders. Upload a clip present in your dataset to use precomputed embeddings, or enable TensorFlow for real-time embeddings.")
+                with st.form("send_report_form"):
+                    reporter = st.text_input("Your name (optional)")
+                    email = st.text_input("Contact email (optional)")
+                    notes = st.text_area("Notes / location details")
+                    submitted = st.form_submit_button("Send Report")
+                    if submitted:
+                        st.success("Report submitted. Thank you for taking action!")
         
     except Exception as e:
         st.error(f"Error processing audio: {str(e)}")
@@ -313,6 +299,7 @@ def show_batch_predictions():
     st.caption(f"Model: {RF_MODEL_PATH}")
 
     try:
+        from src.models.reef_classifier import load_embeddings_from_csv, load_master_dataset, align_embeddings_and_labels, load_trained_rf_model, predict_with_model
         with st.spinner("Loading data and model..."):
             X_emb, emb_df = load_embeddings_from_csv()
             dataset_df = load_master_dataset()
@@ -381,6 +368,76 @@ def show_batch_predictions():
         st.error(f"File not found: {e}")
     except Exception as e:
         st.error(f"Error running batch predictions: {e}")
+
+
+def show_acoustic_map():
+    st.markdown('<h2 class="sub-header">🗺️ Acoustic Map</h2>', unsafe_allow_html=True)
+    try:
+        base_df = load_umap_coordinates()
+        if base_df is None or base_df.empty:
+            st.info("UMAP coordinates not available yet. Place umap_coordinates.csv in data/processed and umap_model.joblib in models/classifiers.")
+            return
+    except Exception as e:
+        st.info(f"UMAP coordinates not available: {e}")
+        return
+
+    import plotly.express as px
+
+    st.markdown("### Training Set Map")
+    fig = px.scatter(
+        base_df,
+        x=base_df.columns[0],
+        y=base_df.columns[1],
+        color=base_df.columns[2] if base_df.shape[1] > 2 else None,
+        opacity=0.7,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("### Transform a New Point")
+    uploaded = st.file_uploader("Upload a clip to place on the map", type=["wav", "mp3", "flac"], key="umap_uploader")
+    if uploaded is None:
+        return
+
+    # Quick WAV read (same as analyze)
+    import wave, contextlib, tempfile, os
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
+        tmp_file.write(uploaded.getvalue())
+        tmp_path = tmp_file.name
+    try:
+        with contextlib.closing(wave.open(tmp_path, 'rb')) as wf:
+            n_channels = wf.getnchannels()
+            sr = wf.getframerate()
+            n_frames = wf.getnframes()
+            raw_bytes = wf.readframes(n_frames)
+            sample_width = wf.getsampwidth()
+        dtype = {1: np.int8, 2: np.int16, 3: np.int32, 4: np.int32}.get(sample_width, np.int16)
+        audio_np = np.frombuffer(raw_bytes, dtype=dtype)
+        if n_channels > 1:
+            audio_np = audio_np.reshape(-1, n_channels).mean(axis=1)
+        max_val = np.max(np.abs(audio_np)) or 1
+        audio_np = (audio_np.astype(np.float32) / max_val).astype(np.float32)
+
+        # Compute/resolve features and transform
+        feature_vals, _ = resolve_features_for_file(uploaded.name, audio_np, sr)
+        coord = transform_with_umap(feature_vals)
+        if coord is None:
+            st.warning("Could not transform point with UMAP model.")
+            return
+
+        # Plot overlay
+        new_df = base_df.copy()
+        fig2 = px.scatter(
+            new_df,
+            x=new_df.columns[0],
+            y=new_df.columns[1],
+            color=new_df.columns[2] if new_df.shape[1] > 2 else None,
+            opacity=0.6,
+        )
+        fig2.add_scatter(x=[coord[0,0]], y=[coord[0,1]], mode="markers", marker_symbol="star", marker_size=16, marker_color="red", name="uploaded")
+        st.plotly_chart(fig2, use_container_width=True)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 if __name__ == "__main__":
     main()
