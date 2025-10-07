@@ -136,10 +136,25 @@ def predict_vital_signs(feature_vals: np.ndarray) -> PredictionResult:
             except Exception:
                 health_conf = None
         
-        # The RF model predicts: 0=healthy, 1=degraded, 2=anthrophony
-        # Map predictions to labels
-        pred_map = {0: "healthy", 1: "degraded", 2: "anthrophony"}
-        raw_pred = pred_map.get(int(health_pred[0]), "unknown")
+        # Robustly derive raw_pred using model's classes_ when available
+        classes = getattr(health_model, "classes_", None)
+        if isinstance(health_pred[0], (str, bytes)):
+            raw_pred = str(health_pred[0])
+        elif isinstance(health_pred[0], (int, np.integer)) and classes is not None and len(classes) > int(health_pred[0]) >= 0:
+            raw_pred = str(classes[int(health_pred[0])])
+        else:
+            # Fallback to probability argmax if available
+            if hasattr(health_model, "predict_proba"):
+                try:
+                    proba = health_model.predict_proba(feature_vals)[0]
+                    if classes is not None and len(proba) == len(classes):
+                        raw_pred = str(classes[int(np.argmax(proba))])
+                    else:
+                        raw_pred = "unknown"
+                except Exception:
+                    raw_pred = "unknown"
+            else:
+                raw_pred = "unknown"
         
         # Health assessment: healthy vs degraded (ignore anthrophony for health)
         if raw_pred == "healthy":

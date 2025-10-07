@@ -183,10 +183,23 @@ def predict_with_real_model(feature_vals: np.ndarray) -> RealPredictionResult:
             except Exception as e:
                 logger.warning(f"Real model probability prediction failed: {e}")
         
-        # Map prediction to labels (same as your original model)
-        class_map = {0: "healthy", 1: "degraded", 2: "anthrophony"}
-        pred_idx = int(prediction[0]) if isinstance(prediction[0], (int, np.integer)) else 0
-        raw_pred = class_map.get(pred_idx, "unknown")
+        # Determine raw_pred robustly for both string and numeric class labels
+        classes = getattr(model, "classes_", None)
+        if isinstance(prediction[0], (str, bytes)):
+            raw_pred = str(prediction[0])
+        elif isinstance(prediction[0], (int, np.integer)) and classes is not None:
+            idx = int(prediction[0])
+            if 0 <= idx < len(classes):
+                raw_pred = str(classes[idx])
+            else:
+                raw_pred = "unknown"
+        else:
+            # Fallback: try to infer from argmax of probabilities
+            if probabilities is not None and classes is not None:
+                idx = int(np.argmax(probabilities[0]))
+                raw_pred = str(classes[idx])
+            else:
+                raw_pred = "unknown"
         logger.info(f"🎯 MAPPED PREDICTION: {raw_pred}")
         
         # Health assessment
@@ -205,13 +218,30 @@ def predict_with_real_model(feature_vals: np.ndarray) -> RealPredictionResult:
         else:
             noise_label = "Low"
         
-        # Confidence scores from REAL model
+        # Confidence scores from REAL model (map to class probs if available)
         health_conf = None
         noise_conf = None
         if probabilities is not None:
-            max_prob = float(np.max(probabilities[0]))
-            health_conf = max_prob
-            noise_conf = max_prob
+            try:
+                # If we can find the probability for the chosen raw_pred class, prefer that
+                if classes is not None and raw_pred in set(map(str, classes)):
+                    cls_to_prob = {str(c): float(p) for c, p in zip(classes, probabilities[0])}
+                    chosen_prob = cls_to_prob.get(raw_pred)
+                    if chosen_prob is not None:
+                        health_conf = chosen_prob
+                        noise_conf = chosen_prob
+                    else:
+                        max_prob = float(np.max(probabilities[0]))
+                        health_conf = max_prob
+                        noise_conf = max_prob
+                else:
+                    max_prob = float(np.max(probabilities[0]))
+                    health_conf = max_prob
+                    noise_conf = max_prob
+            except Exception:
+                max_prob = float(np.max(probabilities[0]))
+                health_conf = max_prob
+                noise_conf = max_prob
         
         logger.info(f"🎯 REAL MODEL RESULT - Health: {health_label}, Noise: {noise_label}")
         
