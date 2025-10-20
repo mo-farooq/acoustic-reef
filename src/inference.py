@@ -35,8 +35,8 @@ def load_health_classifier():
             return joblib.load(health_path)
     except Exception as e:
         logger.warning(f"Could not load dedicated health classifier: {e}")
-    
-    # Fallback to legacy single model
+
+    # Fallback to legacy single model (auto-resolved path)
     try:
         legacy = Path(config.RF_MODEL_PATH)
         if legacy.exists():
@@ -180,10 +180,30 @@ def predict_vital_signs(feature_vals: np.ndarray) -> PredictionResult:
         # Noise assessment: anthrophony vs others
         if raw_pred == "anthrophony":
             noise_label = "High"
-            noise_conf = health_conf if health_conf is not None else 0.8
+            # For anthrophony, use the probability of anthrophony class specifically
+            if hasattr(health_model, "predict_proba") and classes is not None:
+                try:
+                    proba = health_model.predict_proba(feature_vals)[0]
+                    cls_to_prob = {str(c): float(p) for c, p in zip(classes, proba)}
+                    noise_conf = cls_to_prob.get("anthrophony", health_conf if health_conf is not None else 0.8)
+                except Exception:
+                    noise_conf = health_conf if health_conf is not None else 0.8
+            else:
+                noise_conf = health_conf if health_conf is not None else 0.8
         else:
             noise_label = "Low"
-            noise_conf = health_conf if health_conf is not None else 0.8
+            # For non-anthrophony, use the probability of non-anthrophony classes
+            if hasattr(health_model, "predict_proba") and classes is not None:
+                try:
+                    proba = health_model.predict_proba(feature_vals)[0]
+                    cls_to_prob = {str(c): float(p) for c, p in zip(classes, proba)}
+                    # Sum probabilities of healthy + degraded (non-anthrophony)
+                    non_anthro_prob = cls_to_prob.get("healthy", 0) + cls_to_prob.get("degraded", 0)
+                    noise_conf = max(0.1, non_anthro_prob)  # Ensure minimum confidence
+                except Exception:
+                    noise_conf = health_conf if health_conf is not None else 0.8
+            else:
+                noise_conf = health_conf if health_conf is not None else 0.8
 
         return PredictionResult(
             health_label=health_label,

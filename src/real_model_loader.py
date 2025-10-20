@@ -25,7 +25,12 @@ class RealPredictionResult:
 def force_load_real_model():
     """Force load the REAL trained model by bypassing all version issues"""
     try:
-        model_path = Path("models/classifiers/reef_classifier_rf.joblib")
+        # Use configured RF model path, with fallback handling
+        try:
+            from src.utils.config import RF_MODEL_PATH
+            model_path = Path(RF_MODEL_PATH)
+        except Exception:
+            model_path = Path("models/classifiers/reef_classifier_rf.joblib")
         if not model_path.exists():
             raise FileNotFoundError(f"Model not found at {model_path}")
         
@@ -218,26 +223,29 @@ def predict_with_real_model(feature_vals: np.ndarray) -> RealPredictionResult:
         else:
             noise_label = "Low"
         
-        # Confidence scores from REAL model (map to class probs if available)
+        # Confidence scores from REAL model (separate health and noise)
         health_conf = None
         noise_conf = None
         if probabilities is not None:
             try:
-                # If we can find the probability for the chosen raw_pred class, prefer that
-                if classes is not None and raw_pred in set(map(str, classes)):
-                    cls_to_prob = {str(c): float(p) for c, p in zip(classes, probabilities[0])}
-                    chosen_prob = cls_to_prob.get(raw_pred)
-                    if chosen_prob is not None:
-                        health_conf = chosen_prob
-                        noise_conf = chosen_prob
-                    else:
-                        max_prob = float(np.max(probabilities[0]))
-                        health_conf = max_prob
-                        noise_conf = max_prob
+                cls_to_prob = {str(c): float(p) for c, p in zip(classes, probabilities[0])}
+                
+                # Health confidence: probability of the health-related class
+                if raw_pred == "healthy":
+                    health_conf = cls_to_prob.get("healthy", 0.5)
+                elif raw_pred == "degraded":
+                    health_conf = cls_to_prob.get("degraded", 0.5)
+                else:  # anthrophony
+                    health_conf = cls_to_prob.get("anthrophony", 0.5)
+                
+                # Noise confidence: probability of anthrophony vs non-anthrophony
+                if raw_pred == "anthrophony":
+                    noise_conf = cls_to_prob.get("anthrophony", 0.5)
                 else:
-                    max_prob = float(np.max(probabilities[0]))
-                    health_conf = max_prob
-                    noise_conf = max_prob
+                    # Sum of healthy + degraded probabilities
+                    noise_conf = cls_to_prob.get("healthy", 0) + cls_to_prob.get("degraded", 0)
+                    noise_conf = max(0.1, noise_conf)  # Ensure minimum confidence
+                    
             except Exception:
                 max_prob = float(np.max(probabilities[0]))
                 health_conf = max_prob

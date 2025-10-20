@@ -24,7 +24,19 @@ MASTER_DATASET_CSV = PROCESSED_DATA_DIR / "dataset.csv"
 SURFPERCH_MODEL_DIR = MODELS_DIR / "surfperch"
 SURFPERCH_TF_SAVEDMODEL_DIR = SURFPERCH_MODEL_DIR / "surfperch-tensorflow2-1-v1"
 CLASSIFIER_MODEL_DIR = MODELS_DIR / "classifiers"
-RF_MODEL_PATH = CLASSIFIER_MODEL_DIR / "reef_classifier_rf.joblib"
+
+# Prefer standard RF filename; fall back to reef_health_rf.joblib if present
+def _resolve_rf_model_path() -> Path:
+    primary = CLASSIFIER_MODEL_DIR / "reef_classifier_rf.joblib"
+    fallback = CLASSIFIER_MODEL_DIR / "reef_health_rf.joblib"
+    if primary.exists():
+        return primary
+    if fallback.exists():
+        return fallback
+    return primary  # default path when neither exists yet
+
+RF_MODEL_PATH = _resolve_rf_model_path()
+
 HEALTH_CLASSIFIER_PATH = CLASSIFIER_MODEL_DIR / "health_classifier.joblib"
 NOISE_CLASSIFIER_PATH = CLASSIFIER_MODEL_DIR / "noise_classifier.joblib"
 

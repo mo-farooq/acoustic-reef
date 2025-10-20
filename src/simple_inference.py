@@ -24,7 +24,12 @@ class SimplePredictionResult:
 def load_model_directly() -> any:
     """Load the RandomForest model directly without caching"""
     try:
-        model_path = Path("models/classifiers/reef_classifier_rf.joblib")
+        # Use resolved RF model path from config
+        try:
+            from src.utils.config import RF_MODEL_PATH
+            model_path = Path(RF_MODEL_PATH)
+        except Exception:
+            model_path = Path("models/classifiers/reef_classifier_rf.joblib")
         if not model_path.exists():
             raise FileNotFoundError(f"Model not found at {model_path}")
         
@@ -75,13 +80,31 @@ def predict_simple(feature_vals: np.ndarray) -> SimplePredictionResult:
         else:
             noise_label = "Low"
         
-        # Confidence scores
+        # Confidence scores (separate health and noise)
         health_conf = None
         noise_conf = None
         if probabilities is not None:
-            max_prob = float(np.max(probabilities[0]))
-            health_conf = max_prob
-            noise_conf = max_prob
+            try:
+                # Health confidence: probability of the predicted health class
+                if raw_pred == "healthy":
+                    health_conf = float(probabilities[0][0])  # healthy class probability
+                elif raw_pred == "degraded":
+                    health_conf = float(probabilities[0][1])  # degraded class probability
+                else:  # anthrophony
+                    health_conf = float(probabilities[0][2])  # anthrophony class probability
+                
+                # Noise confidence: probability of anthrophony vs non-anthrophony
+                if raw_pred == "anthrophony":
+                    noise_conf = float(probabilities[0][2])  # anthrophony probability
+                else:
+                    # Sum of healthy + degraded probabilities
+                    noise_conf = float(probabilities[0][0] + probabilities[0][1])
+                    noise_conf = max(0.1, noise_conf)  # Ensure minimum confidence
+                    
+            except Exception:
+                max_prob = float(np.max(probabilities[0]))
+                health_conf = max_prob
+                noise_conf = max_prob
         
         return SimplePredictionResult(
             health_label=health_label,

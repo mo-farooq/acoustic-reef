@@ -26,7 +26,12 @@ class ForcePredictionResult:
 def force_load_model():
     """Force load the model by bypassing all compatibility issues"""
     try:
-        model_path = Path("models/classifiers/reef_classifier_rf.joblib")
+        # Use configured RF model path if available
+        try:
+            from src.utils.config import RF_MODEL_PATH
+            model_path = Path(RF_MODEL_PATH)
+        except Exception:
+            model_path = Path("models/classifiers/reef_classifier_rf.joblib")
         if not model_path.exists():
             raise FileNotFoundError(f"Model not found at {model_path}")
         
@@ -242,13 +247,31 @@ def predict_with_force_classifier(feature_vals: np.ndarray) -> ForcePredictionRe
         else:
             noise_label = "Low"
         
-        # Confidence scores
+        # Confidence scores (separate health and noise)
         health_conf = None
         noise_conf = None
         if probabilities is not None:
-            max_prob = float(np.max(probabilities[0]))
-            health_conf = max_prob
-            noise_conf = max_prob
+            try:
+                # Health confidence: probability of the predicted health class
+                if raw_pred == "healthy":
+                    health_conf = float(probabilities[0][0])  # healthy class probability
+                elif raw_pred == "degraded":
+                    health_conf = float(probabilities[0][1])  # degraded class probability
+                else:  # anthrophony
+                    health_conf = float(probabilities[0][2])  # anthrophony class probability
+                
+                # Noise confidence: probability of anthrophony vs non-anthrophony
+                if raw_pred == "anthrophony":
+                    noise_conf = float(probabilities[0][2])  # anthrophony probability
+                else:
+                    # Sum of healthy + degraded probabilities
+                    noise_conf = float(probabilities[0][0] + probabilities[0][1])
+                    noise_conf = max(0.1, noise_conf)  # Ensure minimum confidence
+                    
+            except Exception:
+                max_prob = float(np.max(probabilities[0]))
+                health_conf = max_prob
+                noise_conf = max_prob
         
         logger.info(f"Final result - Health: {health_label}, Noise: {noise_label}")
         

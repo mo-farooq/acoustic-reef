@@ -258,30 +258,169 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                 max_val = np.max(np.abs(audio_np)) or 1
                 audio_np = (audio_np.astype(np.float32) / max_val).astype(np.float32)
 
-            # Simple spectrogram visualization with numpy/plotly (no librosa dependency here)
+            # Enhanced spectrogram visualization with modern styling
             try:
                 import plotly.express as px
+                import plotly.graph_objects as go
                 import numpy as _np
-                # Compute a basic magnitude spectrogram using short windows
-                win = 1024
-                hop = 512
+                
+                # Compute enhanced spectrogram with better parameters
+                win = 2048  # Larger window for better frequency resolution
+                hop = 512   # 75% overlap for smoother visualization
                 num_frames = max(1, (len(audio_np) - win) // hop + 1)
+                
+                # Apply window function for better spectral analysis
+                window = _np.hanning(win)
+                
                 spec = []
                 for i in range(num_frames):
                     start = i * hop
                     frame = audio_np[start:start+win]
                     if len(frame) < win:
                         frame = _np.pad(frame, (0, win - len(frame)))
-                    mag = _np.abs(_np.fft.rfft(frame))
+                    
+                    # Apply window and compute FFT
+                    windowed_frame = frame * window
+                    fft_result = _np.fft.rfft(windowed_frame)
+                    mag = _np.abs(fft_result)
                     spec.append(mag)
+                
                 spec = _np.array(spec).T  # [freq, time]
-                spec_db = 20 * _np.log10(spec + 1e-6)
-                fig_s = px.imshow(spec_db, origin='lower', color_continuous_scale='Viridis', labels=dict(color='dB'))
-                fig_s.update_layout(height=300, margin=dict(l=0,r=0,t=0,b=0))
-                st.markdown("#### Spectrogram")
+                
+                # Convert to dB with better dynamic range
+                spec_db = 20 * _np.log10(spec + 1e-10)
+                
+                # Create time and frequency axes
+                time_axis = _np.linspace(0, duration_sec, spec.shape[1])
+                freq_axis = _np.linspace(0, sr/2, spec.shape[0])
+                
+                # Create enhanced spectrogram with modern styling
+                fig_s = go.Figure(data=go.Heatmap(
+                    z=spec_db,
+                    x=time_axis,
+                    y=freq_axis,
+                    colorscale='Viridis',
+                    colorbar=dict(
+                        title=dict(
+                            text="Power (dB)",
+                            font=dict(size=12, color='#2c3e50')
+                        ),
+                        tickfont=dict(size=10, color='#2c3e50'),
+                        len=0.8,
+                        y=0.5,
+                        yanchor='middle'
+                    ),
+                    hovertemplate='<b>Time:</b> %{x:.2f}s<br><b>Frequency:</b> %{y:.0f} Hz<br><b>Power:</b> %{z:.1f} dB<extra></extra>',
+                    hoverongaps=False
+                ))
+                
+                # Enhanced layout with modern styling
+                fig_s.update_layout(
+                    title=dict(
+                        text="🎵 Audio Spectrogram Analysis",
+                        font=dict(size=18, color='#1f77b4', family='Arial, sans-serif'),
+                        x=0.5,
+                        xanchor='center'
+                    ),
+                    xaxis=dict(
+                        title=dict(
+                            text="Time (seconds)",
+                            font=dict(size=14, color='#2c3e50')
+                        ),
+                        tickfont=dict(size=12, color='#2c3e50'),
+                        gridcolor='rgba(128,128,128,0.2)',
+                        showgrid=True,
+                        zeroline=False
+                    ),
+                    yaxis=dict(
+                        title=dict(
+                            text="Frequency (Hz)",
+                            font=dict(size=14, color='#2c3e50')
+                        ),
+                        tickfont=dict(size=12, color='#2c3e50'),
+                        gridcolor='rgba(128,128,128,0.2)',
+                        showgrid=True,
+                        zeroline=False
+                    ),
+                    height=400,
+                    margin=dict(l=60, r=20, t=60, b=60),
+                    plot_bgcolor='rgba(248,249,250,0.8)',
+                    paper_bgcolor='rgba(255,255,255,0.9)',
+                    font=dict(family='Arial, sans-serif')
+                )
+                
+                # Add frequency band annotations for marine acoustics
+                max_freq = sr/2
+                if max_freq >= 2000:
+                    # Add frequency band annotations
+                    bands = [
+                        (0, 20, "Infrasound", "#ff6b6b"),
+                        (20, 200, "Low Frequency", "#4ecdc4"),
+                        (200, 2000, "Mid Frequency", "#45b7d1"),
+                        (2000, max_freq, "High Frequency", "#96ceb4")
+                    ]
+                    
+                    for low, high, label, color in bands:
+                        if high <= max_freq:
+                            fig_s.add_annotation(
+                                x=0.02, y=(low + high) / 2,
+                                text=label,
+                                showarrow=False,
+                                font=dict(size=10, color=color),
+                                bgcolor="rgba(255,255,255,0.8)",
+                                bordercolor=color,
+                                borderwidth=1,
+                                xref="paper", yref="y"
+                            )
+                
+                st.markdown("### 🎵 Audio Spectrogram Analysis")
                 st.plotly_chart(fig_s, use_container_width=True)
-            except Exception:
-                pass
+                
+                # Add informative text about the spectrogram
+                with st.expander("ℹ️ About this spectrogram", expanded=False):
+                    st.markdown("""
+                    **What you're seeing:**
+                    - **X-axis (Time)**: Shows how the audio changes over time
+                    - **Y-axis (Frequency)**: Shows different sound frequencies (Hz)
+                    - **Color intensity**: Shows sound power (darker = louder)
+                    
+                    **Marine acoustics context:**
+                    - **0-20 Hz**: Infrasound (whale calls, seismic activity)
+                    - **20-200 Hz**: Low frequency (fish sounds, boat engines)
+                    - **200-2000 Hz**: Mid frequency (coral reef sounds, marine life)
+                    - **2000+ Hz**: High frequency (dolphin clicks, anthropogenic noise)
+                    
+                    **Healthy reef indicators:**
+                    - Rich, diverse frequency content
+                    - Consistent sound patterns
+                    - Natural marine life sounds
+                    """)
+                    
+            except Exception as e:
+                st.warning(f"Could not generate spectrogram: {e}")
+                # Fallback to simple visualization
+                try:
+                    import plotly.express as px
+                    import numpy as _np
+                    # Simple fallback spectrogram
+                    win = 1024
+                    hop = 512
+                    num_frames = max(1, (len(audio_np) - win) // hop + 1)
+                    spec = []
+                    for i in range(num_frames):
+                        start = i * hop
+                        frame = audio_np[start:start+win]
+                        if len(frame) < win:
+                            frame = _np.pad(frame, (0, win - len(frame)))
+                        mag = _np.abs(_np.fft.rfft(frame))
+                        spec.append(mag)
+                    spec = _np.array(spec).T
+                    spec_db = 20 * _np.log10(spec + 1e-6)
+                    fig_s = px.imshow(spec_db, origin='lower', color_continuous_scale='Viridis')
+                    fig_s.update_layout(height=300, title="Basic Spectrogram")
+                    st.plotly_chart(fig_s, use_container_width=True)
+                except Exception:
+                    st.info("Spectrogram visualization not available")
 
             # Resolve feature vector (precomputed vs runtime)
             file_basename = os.path.basename(getattr(uploaded_file, 'name', ''))
@@ -295,15 +434,30 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
 
             # Predict vital signs (health + noise)
             try:
-                # Use the REAL trained model - no fallbacks, no mocks
+                # Try REAL trained model first
                 result = predict_with_real_model(feature_vals)
                 st.success("✅ Using REAL trained model!")
-            except Exception as e:
-                st.error("Analysis failed during prediction. Please try again later.")
-                return
+            except Exception as e_real:
+                # Fallback 1: force-compatible classifier
+                try:
+                    result = predict_with_force_classifier(feature_vals)
+                    st.warning("🛠️ Real model missing/incompatible. Using force-compatible classifier.")
+                except Exception as e_force:
+                    # Fallback 2: mock classifier as last resort
+                    try:
+                        result = predict_with_mock_classifier(feature_vals)
+                        st.warning("ℹ️ Using mock classifier heuristic due to missing trained model.")
+                    except Exception as e_mock:
+                        st.error("Analysis failed during prediction. Please try again later.")
+                        return
 
             # Vital Signs UI
             st.markdown("### 🩺 Vital Signs")
+            
+            # Debug output to see actual values
+            st.write(f"🔍 Debug - Health conf: {result.health_conf}, Noise conf: {result.noise_conf}")
+            st.write(f"🔍 Debug - Are they equal? {result.health_conf == result.noise_conf}")
+            
             col1, col2 = st.columns(2)
             with col1:
                 color = "status-healthy" if result.health_label == "Healthy" else "status-degraded"
@@ -318,27 +472,208 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                 if result.noise_conf is not None:
                     st.metric("Confidence", f"{result.noise_conf:.0%}")
 
-            # Show per-class probabilities if available
+            # Enhanced Class Probabilities Visualization
             try:
                 import joblib
+                import plotly.graph_objects as go
+                from plotly.subplots import make_subplots
                 from src.utils.config import RF_MODEL_PATH
                 model = joblib.load(RF_MODEL_PATH)
                 if hasattr(model, "predict_proba") and hasattr(model, "classes_"):
                     probs = model.predict_proba(feature_vals)[0]
                     cls_to_prob = {str(c): float(p) for c, p in zip(model.classes_, probs)}
-                    st.markdown("#### Class Probabilities")
-                    try:
-                        import plotly.express as px
-                        prob_df = pd.DataFrame({"class": list(cls_to_prob.keys()), "probability": list(cls_to_prob.values())})
-                        fig = px.bar(prob_df, x="class", y="probability", range_y=[0,1], color="class")
-                        st.plotly_chart(fig, use_container_width=True)
-                    except Exception:
+                    
+                    st.markdown("### 📊 Model Confidence Analysis")
+                    
+                    # Create enhanced visualization with multiple charts
+                    fig = make_subplots(
+                        rows=2, cols=2,
+                        subplot_titles=("Class Probabilities", "Confidence Distribution", "Prediction Certainty", "Model Insights"),
+                        specs=[[{"type": "bar"}, {"type": "pie"}],
+                               [{"type": "indicator"}, {"type": "bar"}]],
+                        vertical_spacing=0.15,
+                        horizontal_spacing=0.1
+                    )
+                    
+                    # 1. Enhanced Bar Chart with custom colors and styling
+                    class_names = list(cls_to_prob.keys())
+                    probabilities = list(cls_to_prob.values())
+                    
+                    # Define colors for each class
+                    color_map = {
+                        'healthy': '#2E8B57',      # Sea Green
+                        'degraded': '#DC143C',     # Crimson  
+                        'anthrophony': '#FF8C00'   # Dark Orange
+                    }
+                    colors = [color_map.get(cls, '#6A5ACD') for cls in class_names]
+                    
+                    # Bar chart with enhanced styling
+                    fig.add_trace(
+                        go.Bar(
+                            x=class_names,
+                            y=probabilities,
+                            marker=dict(
+                                color=colors,
+                                line=dict(width=2, color='white'),
+                                opacity=0.8
+                            ),
+                            text=[f"{p:.1%}" for p in probabilities],
+                            textposition='auto',
+                            textfont=dict(size=14, color='white', family='Arial Black'),
+                            name="Probability",
+                            showlegend=False
+                        ),
+                        row=1, col=1
+                    )
+                    
+                    # 2. Pie chart for probability distribution
+                    fig.add_trace(
+                        go.Pie(
+                            labels=class_names,
+                            values=probabilities,
+                            marker=dict(colors=colors, line=dict(color='white', width=2)),
+                            textinfo='label+percent',
+                            textfont=dict(size=12, family='Arial'),
+                            hovertemplate='<b>%{label}</b><br>Probability: %{percent}<br>Value: %{value:.3f}<extra></extra>',
+                            name="Distribution"
+                        ),
+                        row=1, col=2
+                    )
+                    
+                    # 3. Confidence gauge
+                    max_prob = max(probabilities)
+                    fig.add_trace(
+                        go.Indicator(
+                            mode="gauge+number+delta",
+                            value=max_prob * 100,
+                            domain={'x': [0, 1], 'y': [0, 1]},
+                            title={'text': "Model Confidence (%)"},
+                            delta={'reference': 50},
+                            gauge={
+                                'axis': {'range': [None, 100]},
+                                'bar': {'color': "darkblue"},
+                                'steps': [
+                                    {'range': [0, 50], 'color': "lightgray"},
+                                    {'range': [50, 80], 'color': "yellow"},
+                                    {'range': [80, 100], 'color': "green"}
+                                ],
+                                'threshold': {
+                                    'line': {'color': "red", 'width': 4},
+                                    'thickness': 0.75,
+                                    'value': 90
+                                }
+                            }
+                        ),
+                        row=2, col=1
+                    )
+                    
+                    # 4. Model insights bar chart
+                    insights_data = {
+                        'Model Certainty': max_prob,
+                        'Prediction Spread': max(probabilities) - min(probabilities),
+                        'Second Best': sorted(probabilities, reverse=True)[1],
+                        'Uncertainty': 1 - max_prob
+                    }
+                    
+                    fig.add_trace(
+                        go.Bar(
+                            x=list(insights_data.keys()),
+                            y=list(insights_data.values()),
+                            marker=dict(
+                                color=['#4CAF50', '#FF9800', '#2196F3', '#F44336'],
+                                opacity=0.7
+                            ),
+                            text=[f"{v:.3f}" for v in insights_data.values()],
+                            textposition='auto',
+                            name="Insights",
+                            showlegend=False
+                        ),
+                        row=2, col=2
+                    )
+                    
+                    # Update layout with modern styling
+                    fig.update_layout(
+                        title=dict(
+                            text="🎯 AI Model Decision Breakdown",
+                            font=dict(size=20, color='#1f77b4', family='Arial, sans-serif'),
+                            x=0.5,
+                            xanchor='center'
+                        ),
+                        height=600,
+                        showlegend=False,
+                        plot_bgcolor='rgba(248,249,250,0.8)',
+                        paper_bgcolor='rgba(255,255,255,0.9)',
+                        font=dict(family='Arial, sans-serif', size=12)
+                    )
+                    
+                    # Update axes styling
+                    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
+                    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Add interpretation section
+                    with st.expander("🧠 Model Interpretation", expanded=True):
+                        st.markdown("""
+                        **What this analysis shows:**
+                        
+                        - **Class Probabilities**: How confident the AI is about each possible outcome
+                        - **Confidence Distribution**: Visual breakdown of model certainty
+                        - **Model Confidence**: Overall certainty level (higher = more confident)
+                        - **Model Insights**: Key metrics about the prediction quality
+                        
+                        **Understanding the results:**
+                        - **High confidence (>80%)**: Model is very certain about the prediction
+                        - **Medium confidence (50-80%)**: Some uncertainty, but still reliable
+                        - **Low confidence (<50%)**: High uncertainty, consider retaking the recording
+                        
+                        **Class meanings:**
+                        - **Healthy**: Reef shows signs of good health and biodiversity
+                        - **Degraded**: Reef shows signs of stress or damage
+                        - **Anthrophony**: Human-made noise detected (boats, engines, etc.)
+                        """)
+                    
+                    # Enhanced metrics display
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Highest Confidence", f"{max_prob:.1%}", 
+                                delta=f"{max_prob - 0.5:.1%}" if max_prob > 0.5 else None)
+                    with col2:
+                        second_best = sorted(probabilities, reverse=True)[1]
+                        st.metric("Second Best", f"{second_best:.1%}")
+                    with col3:
+                        uncertainty = 1 - max_prob
+                        st.metric("Uncertainty", f"{uncertainty:.1%}")
+                    
+                    # Downloadable CSV with enhanced data
+                    enhanced_data = {
+                        **cls_to_prob,
+                        'max_confidence': max_prob,
+                        'uncertainty': 1 - max_prob,
+                        'prediction_spread': max(probabilities) - min(probabilities)
+                    }
+                    csv_bytes = pd.DataFrame([enhanced_data]).to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        "📥 Download Enhanced Analysis (CSV)", 
+                        data=csv_bytes, 
+                        file_name="enhanced_prediction_analysis.csv", 
+                        mime="text/csv"
+                    )
+                    
+            except Exception as e:
+                st.warning(f"Enhanced probability visualization not available: {e}")
+                # Fallback to simple display
+                try:
+                    import joblib
+                    from src.utils.config import RF_MODEL_PATH
+                    model = joblib.load(RF_MODEL_PATH)
+                    if hasattr(model, "predict_proba") and hasattr(model, "classes_"):
+                        probs = model.predict_proba(feature_vals)[0]
+                        cls_to_prob = {str(c): float(p) for c, p in zip(model.classes_, probs)}
+                        st.markdown("#### Class Probabilities")
                         st.json(cls_to_prob)
-                    # Downloadable CSV for this prediction
-                    csv_bytes = pd.DataFrame([cls_to_prob]).to_csv(index=False).encode("utf-8")
-                    st.download_button("Download probabilities (CSV)", data=csv_bytes, file_name="prediction_probabilities.csv", mime="text/csv")
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
             # Confidence explanation
             with st.expander("What does confidence mean?"):
