@@ -870,73 +870,256 @@ def run_batch_upload(batch_files):
 
 
 def show_acoustic_map():
+    """Enhanced Acoustic Map visualization with modern styling and interactivity."""
     st.markdown('<h2 class="sub-header">🗺️ Acoustic Map</h2>', unsafe_allow_html=True)
+    
+    # Introduction
+    st.markdown("""
+    **Explore the acoustic landscape of coral reefs!** This interactive map shows how different reef recordings cluster 
+    in acoustic space, helping you understand the relationship between sound patterns and reef health.
+    """)
+    
     try:
         base_df = load_umap_coordinates()
         if base_df is None or base_df.empty:
-            st.info("UMAP coordinates not available yet. Place umap_coordinates.csv in data/processed and umap_model.joblib in models/classifiers.")
+            st.info("🔄 UMAP coordinates not available. Generating them now...")
+            st.info("Please run `python generate_umap.py` to create the acoustic map visualization.")
             return
     except Exception as e:
-        st.info(f"UMAP coordinates not available: {e}")
+        st.error(f"❌ UMAP coordinates not available: {e}")
         return
 
     import plotly.express as px
+    import plotly.graph_objects as go
 
-    st.markdown("### Training Set Map")
+    # Enhanced Training Set Map
+    st.markdown("### 🌊 Acoustic Landscape")
+    st.markdown("Each point represents a reef recording. Colors show health status:")
+    
+    # Create color mapping
+    color_map = {
+        'healthy': '#2E8B57',      # Sea Green
+        'degraded': '#DC143C',      # Crimson  
+        'anthrophony': '#FF8C00'    # Dark Orange
+    }
+    
+    # Enhanced scatter plot
     fig = px.scatter(
         base_df,
-        x=base_df.columns[0],
-        y=base_df.columns[1],
-        color=base_df.columns[2] if base_df.shape[1] > 2 else None,
+        x='x',
+        y='y',
+        color='label',
+        color_discrete_map=color_map,
         opacity=0.7,
+        hover_data=['filename'],
+        title="Reef Acoustic Landscape",
+        labels={
+            'x': 'UMAP Dimension 1',
+            'y': 'UMAP Dimension 2',
+            'label': 'Reef Health Status'
+        }
     )
+    
+    # Enhanced styling
+    fig.update_layout(
+        title=dict(
+            text="🌊 Reef Acoustic Landscape",
+            font=dict(size=20, color='#2c3e50'),
+            x=0.5
+        ),
+        xaxis=dict(
+            title=dict(
+                text="Acoustic Dimension 1",
+                font=dict(size=14, color='#2c3e50')
+            ),
+            gridcolor='rgba(128,128,128,0.2)',
+            showgrid=True
+        ),
+        yaxis=dict(
+            title=dict(
+                text="Acoustic Dimension 2", 
+                font=dict(size=14, color='#2c3e50')
+            ),
+            gridcolor='rgba(128,128,128,0.2)',
+            showgrid=True
+        ),
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        legend=dict(
+            title=dict(
+                text="Reef Health Status",
+                font=dict(size=12, color='#2c3e50')
+            ),
+            bgcolor='rgba(255,255,255,0.8)',
+            bordercolor='rgba(0,0,0,0.2)',
+            borderwidth=1
+        )
+    )
+    
+    # Update marker styling
+    fig.update_traces(
+        marker=dict(
+            size=8,
+            line=dict(width=1, color='white'),
+            opacity=0.8
+        ),
+        selector=dict(mode='markers')
+    )
+    
     st.plotly_chart(fig, use_container_width=True)
+    
+    # Statistics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        healthy_count = len(base_df[base_df['label'] == 'healthy'])
+        st.metric("🌿 Healthy Reefs", healthy_count)
+    with col2:
+        degraded_count = len(base_df[base_df['label'] == 'degraded'])
+        st.metric("⚠️ Degraded Reefs", degraded_count)
+    with col3:
+        anthro_count = len(base_df[base_df['label'] == 'anthrophony'])
+        st.metric("🔊 Noisy Areas", anthro_count)
 
-    st.markdown("### Transform a New Point")
-    uploaded = st.file_uploader("Upload a clip to place on the map", type=["wav", "mp3", "flac"], key="umap_uploader")
+    # Interactive Upload Section
+    st.markdown("### 🎯 Place Your Recording on the Map")
+    st.markdown("Upload an audio file to see where it falls in the acoustic landscape:")
+    
+    uploaded = st.file_uploader(
+        "Upload a reef recording", 
+        type=["wav", "mp3", "flac"], 
+        key="umap_uploader",
+        help="Upload a WAV, MP3, or FLAC file to visualize its position in acoustic space"
+    )
+    
     if uploaded is None:
+        st.info("👆 Upload a file above to see where it appears on the acoustic map")
         return
 
-    # Quick WAV read (same as analyze)
-    import wave, contextlib, tempfile, os
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
-        tmp_file.write(uploaded.getvalue())
-        tmp_path = tmp_file.name
-    try:
-        with contextlib.closing(wave.open(tmp_path, 'rb')) as wf:
-            n_channels = wf.getnchannels()
-            sr = wf.getframerate()
-            n_frames = wf.getnframes()
-            raw_bytes = wf.readframes(n_frames)
-            sample_width = wf.getsampwidth()
-        dtype = {1: np.int8, 2: np.int16, 3: np.int32, 4: np.int32}.get(sample_width, np.int16)
-        audio_np = np.frombuffer(raw_bytes, dtype=dtype)
-        if n_channels > 1:
-            audio_np = audio_np.reshape(-1, n_channels).mean(axis=1)
-        max_val = np.max(np.abs(audio_np)) or 1
-        audio_np = (audio_np.astype(np.float32) / max_val).astype(np.float32)
+    # Process uploaded file
+    with st.spinner("🔍 Analyzing your recording..."):
+        # Quick WAV read (same as analyze)
+        import wave, contextlib, tempfile, os
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
+            tmp_file.write(uploaded.getvalue())
+            tmp_path = tmp_file.name
+        try:
+            with contextlib.closing(wave.open(tmp_path, 'rb')) as wf:
+                n_channels = wf.getnchannels()
+                sr = wf.getframerate()
+                n_frames = wf.getnframes()
+                raw_bytes = wf.readframes(n_frames)
+                sample_width = wf.getsampwidth()
+            dtype = {1: np.int8, 2: np.int16, 3: np.int32, 4: np.int32}.get(sample_width, np.int16)
+            audio_np = np.frombuffer(raw_bytes, dtype=dtype)
+            if n_channels > 1:
+                audio_np = audio_np.reshape(-1, n_channels).mean(axis=1)
+            max_val = np.max(np.abs(audio_np)) or 1
+            audio_np = (audio_np.astype(np.float32) / max_val).astype(np.float32)
 
-        # Compute/resolve features and transform
-        feature_vals, _ = resolve_features_for_file(uploaded.name, audio_np, sr)
-        coord = transform_with_umap(feature_vals)
-        if coord is None:
-            st.warning("Could not transform point with UMAP model.")
-            return
+            # Compute/resolve features and transform
+            feature_vals, _ = resolve_features_for_file(uploaded.name, audio_np, sr)
+            coord = transform_with_umap(feature_vals)
+            if coord is None:
+                st.warning("⚠️ Could not transform point with UMAP model.")
+                return
 
-        # Plot overlay
-        new_df = base_df.copy()
-        fig2 = px.scatter(
-            new_df,
-            x=new_df.columns[0],
-            y=new_df.columns[1],
-            color=new_df.columns[2] if new_df.shape[1] > 2 else None,
-            opacity=0.6,
-        )
-        fig2.add_scatter(x=[coord[0,0]], y=[coord[0,1]], mode="markers", marker_symbol="star", marker_size=16, marker_color="red", name="uploaded")
-        st.plotly_chart(fig2, use_container_width=True)
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+            # Enhanced overlay plot
+            st.markdown("### 🎯 Your Recording on the Map")
+            
+            # Create enhanced overlay
+            fig2 = px.scatter(
+                base_df,
+                x='x',
+                y='y',
+                color='label',
+                color_discrete_map=color_map,
+                opacity=0.6,
+                hover_data=['filename'],
+                title=f"Your Recording: {uploaded.name}",
+                labels={
+                    'x': 'UMAP Dimension 1',
+                    'y': 'UMAP Dimension 2',
+                    'label': 'Reef Health Status'
+                }
+            )
+            
+            # Add the uploaded point with enhanced styling
+            fig2.add_scatter(
+                x=[coord[0,0]], 
+                y=[coord[0,1]], 
+                mode="markers", 
+                marker=dict(
+                    symbol="star",
+                    size=20,
+                    color="red",
+                    line=dict(width=3, color="darkred")
+                ),
+                name="Your Recording",
+                hovertemplate="<b>Your Recording</b><br>" +
+                             "File: " + uploaded.name + "<br>" +
+                             "Position: (%{x:.2f}, %{y:.2f})<br>" +
+                             "<extra></extra>"
+            )
+            
+            # Enhanced styling for overlay
+            fig2.update_layout(
+                title=dict(
+                    text=f"🎯 Your Recording: {uploaded.name}",
+                    font=dict(size=18, color='#2c3e50'),
+                    x=0.5
+                ),
+                xaxis=dict(
+                    title=dict(
+                        text="Acoustic Dimension 1",
+                        font=dict(size=14, color='#2c3e50')
+                    ),
+                    gridcolor='rgba(128,128,128,0.2)',
+                    showgrid=True
+                ),
+                yaxis=dict(
+                    title=dict(
+                        text="Acoustic Dimension 2",
+                        font=dict(size=14, color='#2c3e50')
+                    ),
+                    gridcolor='rgba(128,128,128,0.2)',
+                    showgrid=True
+                ),
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                legend=dict(
+                    title=dict(
+                        text="Reef Health Status",
+                        font=dict(size=12, color='#2c3e50')
+                    ),
+                    bgcolor='rgba(255,255,255,0.8)',
+                    bordercolor='rgba(0,0,0,0.2)',
+                    borderwidth=1
+                )
+            )
+            
+            st.plotly_chart(fig2, use_container_width=True)
+            
+            # Show position info
+            st.markdown("### 📍 Position Analysis")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("X Position", f"{coord[0,0]:.2f}")
+            with col2:
+                st.metric("Y Position", f"{coord[0,1]:.2f}")
+            
+            # Find nearest neighbors
+            distances = np.sqrt(np.sum((base_df[['x', 'y']].values - coord[0])**2, axis=1))
+            nearest_idx = np.argmin(distances)
+            nearest_distance = distances[nearest_idx]
+            nearest_label = base_df.iloc[nearest_idx]['label']
+            nearest_filename = base_df.iloc[nearest_idx]['filename']
+            
+            st.markdown("### 🔍 Nearest Neighbor")
+            st.info(f"**Closest match:** {nearest_filename} ({nearest_label}) - Distance: {nearest_distance:.3f}")
+            
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
 if __name__ == "__main__":
     main()
