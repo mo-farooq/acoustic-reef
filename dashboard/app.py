@@ -17,9 +17,6 @@ import os
 import wave
 import contextlib
 import hashlib
-import datetime
-import base64
-from fpdf import FPDF
 
 from src.models.surfperch_integration import SurfPerchModel
 from src.utils.config import SURFPERCH_SETTINGS, EMBEDDINGS_CSV, MASTER_DATASET_CSV, RF_MODEL_PATH
@@ -92,205 +89,6 @@ def load_model_cached():
             return joblib.load(RF_MODEL_PATH)
         return None
     except Exception:
-        return None
-
-def save_spectrogram_image(spec_db, time_axis, freq_axis, output_path):
-    """
-    Save spectrogram data as a PNG image for PDF embedding.
-    
-    Args:
-        spec_db: Spectrogram data in dB
-        time_axis: Time axis data
-        freq_axis: Frequency axis data
-        output_path: Path to save the image
-        
-    Returns:
-        str: Path to the saved image file
-    """
-    try:
-        import matplotlib.pyplot as plt
-        import matplotlib
-        matplotlib.use('Agg')  # Use non-interactive backend
-        
-        # Create figure
-        fig, ax = plt.subplots(figsize=(12, 8))
-        
-        # Plot spectrogram
-        im = ax.imshow(spec_db, aspect='auto', origin='lower', 
-                      extent=[time_axis[0], time_axis[-1], freq_axis[0], freq_axis[-1]],
-                      cmap='viridis')
-        
-        # Set labels and title
-        ax.set_xlabel('Time (seconds)')
-        ax.set_ylabel('Frequency (Hz)')
-        ax.set_title('Audio Spectrogram Analysis')
-        
-        # Add colorbar
-        cbar = plt.colorbar(im, ax=ax)
-        cbar.set_label('Power (dB)')
-        
-        # Save image
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        return output_path
-        
-    except Exception as e:
-        st.warning(f"Could not save spectrogram image: {e}")
-        return None
-
-def generate_pdf_report(analysis_data):
-    """
-    Generate a comprehensive PDF report summarizing the Acoustic Reef analysis results.
-    
-    Args:
-        analysis_data (dict): Dictionary containing all analysis results
-        
-    Returns:
-        str: Path to the generated PDF file
-    """
-    try:
-        # Create PDF object
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_auto_page_break(auto=True, margin=15)
-        
-        # Set up fonts
-        pdf.set_font('Arial', 'B', 20)
-        
-        # Header Section
-        pdf.cell(0, 10, 'Acoustic Reef Analysis Report', 0, 1, 'C')
-        pdf.ln(5)
-        
-        # Date and time
-        pdf.set_font('Arial', '', 12)
-        current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        pdf.cell(0, 8, f'Generated on: {current_time}', 0, 1, 'C')
-        pdf.ln(10)
-        
-        # Input Details Section
-        pdf.set_font('Arial', 'B', 14)
-        pdf.cell(0, 8, 'Input Details', 0, 1)
-        pdf.set_font('Arial', '', 12)
-        pdf.cell(0, 6, f'Filename: {analysis_data.get("filename", "Unknown")}', 0, 1)
-        pdf.cell(0, 6, f'Duration: {analysis_data.get("duration", "N/A")} seconds', 0, 1)
-        pdf.cell(0, 6, f'Sample Rate: {analysis_data.get("sample_rate", "N/A")} Hz', 0, 1)
-        pdf.cell(0, 6, f'Channels: {analysis_data.get("channels", "N/A")}', 0, 1)
-        pdf.ln(10)
-        
-        # Overall Assessment Section
-        pdf.set_font('Arial', 'B', 14)
-        pdf.cell(0, 8, 'Overall Assessment (Vital Signs)', 0, 1)
-        pdf.set_font('Arial', '', 12)
-        
-        # Health Status
-        health_status = analysis_data.get("health_status", "Unknown")
-        health_confidence = analysis_data.get("health_confidence", 0)
-        pdf.cell(0, 6, f'Reef Health: {health_status}', 0, 1)
-        pdf.cell(0, 6, f'Health Confidence: {health_confidence:.1%}', 0, 1)
-        pdf.ln(3)
-        
-        # Noise Status
-        noise_status = analysis_data.get("noise_status", "Unknown")
-        noise_confidence = analysis_data.get("noise_confidence", 0)
-        pdf.cell(0, 6, f'Noise Pollution: {noise_status}', 0, 1)
-        pdf.cell(0, 6, f'Noise Confidence: {noise_confidence:.1%}', 0, 1)
-        pdf.ln(3)
-        
-        # Model Source
-        model_source = analysis_data.get("model_source", "Unknown")
-        pdf.cell(0, 6, f'Analysis Method: {model_source}', 0, 1)
-        pdf.ln(10)
-        
-        # Visual Evidence Section
-        pdf.set_font('Arial', 'B', 14)
-        pdf.cell(0, 8, 'Visual Evidence', 0, 1)
-        pdf.set_font('Arial', '', 12)
-        
-        # Add spectrogram if available
-        spectrogram_path = analysis_data.get("spectrogram_path")
-        if spectrogram_path and os.path.exists(spectrogram_path):
-            try:
-                pdf.cell(0, 6, 'Spectrogram Analysis:', 0, 1)
-                pdf.image(spectrogram_path, x=10, w=180)
-                pdf.ln(5)
-            except Exception as e:
-                pdf.cell(0, 6, f'Spectrogram could not be embedded: {str(e)}', 0, 1)
-        else:
-            pdf.cell(0, 6, 'Spectrogram: Not available', 0, 1)
-            pdf.cell(0, 6, 'Note: Spectrogram visualization requires matplotlib to be installed', 0, 1)
-        
-        pdf.ln(10)
-        
-        # Acoustic Map Insights Section
-        pdf.set_font('Arial', 'B', 14)
-        pdf.cell(0, 8, 'Acoustic Map Insights', 0, 1)
-        pdf.set_font('Arial', '', 12)
-        
-        acoustic_insights = analysis_data.get("acoustic_insights", [])
-        if acoustic_insights:
-            for insight in acoustic_insights:
-                pdf.cell(0, 6, f'• {insight}', 0, 1)
-        else:
-            pdf.cell(0, 6, 'No acoustic map insights available', 0, 1)
-        
-        pdf.ln(10)
-        
-        # Action Recommendations Section
-        pdf.set_font('Arial', 'B', 14)
-        pdf.cell(0, 8, 'Action Recommendations', 0, 1)
-        pdf.set_font('Arial', '', 12)
-        
-        recommendations = analysis_data.get("recommendations", [])
-        if recommendations:
-            for i, rec in enumerate(recommendations, 1):
-                pdf.cell(0, 6, f'{i}. {rec}', 0, 1)
-        else:
-            pdf.cell(0, 6, 'No specific recommendations available', 0, 1)
-        
-        pdf.ln(10)
-        
-        # Contact Information Section
-        pdf.set_font('Arial', 'B', 14)
-        pdf.cell(0, 8, 'Contact Information', 0, 1)
-        pdf.set_font('Arial', '', 12)
-        
-        contact_info = [
-            "For immediate reef health concerns:",
-            "• Local Marine Patrol: [Contact your local authorities]",
-            "• Marine Conservation Organizations:",
-            "  - Reef Check Foundation",
-            "  - Coral Reef Alliance",
-            "  - Local Marine Protected Area Management",
-            "",
-            "For scientific collaboration:",
-            "• Marine Biology Departments at local universities",
-            "• NOAA Coral Reef Conservation Program",
-            "• International Coral Reef Initiative"
-        ]
-        
-        for info in contact_info:
-            pdf.cell(0, 6, info, 0, 1)
-        
-        pdf.ln(10)
-        
-        # Footer
-        pdf.set_font('Arial', 'I', 10)
-        pdf.cell(0, 6, 'This report was generated by Acoustic Reef - AI-powered stethoscope for the ocean', 0, 1, 'C')
-        pdf.cell(0, 6, 'For more information, visit: [Your Website URL]', 0, 1, 'C')
-        
-        # Save PDF to temporary file
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        pdf_filename = f"Acoustic_Reef_Report_{timestamp}.pdf"
-        pdf_path = os.path.join(tempfile.gettempdir(), pdf_filename)
-        
-        pdf.output(pdf_path)
-        
-        return pdf_path
-        
-    except Exception as e:
-        st.error(f"Error generating PDF report: {str(e)}")
         return None
 
 # Page configuration
@@ -963,25 +761,25 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                             text=[f"{p:.1%}" for p in probabilities],
                             textposition='auto',
                             textfont=dict(size=14, color='white', family='Arial Black'),
-                                name="AI Confidence"
-                            )
-                        ])
-                        
-                        # Update layout for clarity
+                            name="AI Confidence"
+                        )
+                    ])
+                    
+                    # Update layout for clarity
                     fig.update_layout(
                         title=dict(
-                                text="🎯 AI Confidence Breakdown",
-                                font=dict(size=16, color='#2c3e50'),
+                            text="🎯 AI Confidence Breakdown",
+                            font=dict(size=16, color='#2c3e50'),
                             x=0.5,
                             xanchor='center'
                         ),
-                            height=400,
+                        height=400,
                         showlegend=False,
                         plot_bgcolor='rgba(248,249,250,0.8)',
                         paper_bgcolor='rgba(255,255,255,0.9)',
-                            font=dict(family='Arial, sans-serif', size=12),
-                            xaxis=dict(title="Prediction Categories"),
-                            yaxis=dict(title="Confidence Level", range=[0, 1])
+                        font=dict(family='Arial, sans-serif', size=12),
+                        xaxis=dict(title="Prediction Categories"),
+                        yaxis=dict(title="Confidence Level", range=[0, 1])
                     )
                     
                     st.plotly_chart(fig, use_container_width=True)
@@ -1000,125 +798,36 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                         uncertainty = 1 - max_prob
                         st.metric("Uncertainty", f"{uncertainty:.1%}")
                     
-                        # Simple interpretation
-                        with st.expander("ℹ️ What do these results mean?", expanded=False):
-                            st.markdown("""
-                            **Understanding the AI analysis:**
-                            
-                            - **High confidence (>80%)**: Very reliable results
-                            - **Medium confidence (50-80%)**: Good results, some uncertainty
-                            - **Low confidence (<50%)**: Consider retaking the recording
-                            
-                            **What each category means:**
-                            - **Healthy**: Reef shows good biodiversity and natural sounds
-                            - **Degraded**: Reef shows signs of stress or damage  
-                            - **Anthrophony**: Human-made noise detected (boats, engines)
-                            """)
+                    # Simple interpretation
+                    with st.expander("ℹ️ What do these results mean?", expanded=False):
+                        st.markdown("""
+                        **Understanding the AI analysis:**
                         
-                        # Download option
+                        - **High confidence (>80%)**: Very reliable results
+                        - **Medium confidence (50-80%)**: Good results, some uncertainty
+                        - **Low confidence (<50%)**: Consider retaking the recording
+                        
+                        **What each category means:**
+                        - **Healthy**: Reef shows good biodiversity and natural sounds
+                        - **Degraded**: Reef shows signs of stress or damage  
+                        - **Anthrophony**: Human-made noise detected (boats, engines)
+                        """)
+                    
+                    # Download option
                     enhanced_data = {
                         **cls_to_prob,
                         'max_confidence': max_prob,
-                            'uncertainty': 1 - max_prob
+                        'uncertainty': 1 - max_prob
                     }
                     csv_bytes = pd.DataFrame([enhanced_data]).to_csv(index=False).encode("utf-8")
                     st.download_button(
-                            "📥 Download Analysis Results (CSV)", 
+                        "📥 Download Analysis Results (CSV)", 
                         data=csv_bytes, 
-                            file_name="reef_analysis_results.csv", 
+                        file_name="reef_analysis_results.csv", 
                         mime="text/csv"
                     )
                 else:
                     st.info("📊 Detailed AI analysis available with trained model")
-                
-                # PDF Report Generation Section
-                st.markdown("---")
-                st.markdown("### 📄 Comprehensive Report")
-                
-                # Collect all analysis data for PDF report
-                analysis_data = {
-                    "filename": uploaded_file.name if uploaded_file else "Unknown",
-                    "duration": f"{duration_sec:.1f}",
-                    "sample_rate": f"{sr:,}",
-                    "channels": "Mono" if n_channels == 1 else f"{n_channels} ch",
-                    "health_status": result.health_label,
-                    "health_confidence": result.health_conf if result.health_conf is not None else 0,
-                    "noise_status": result.noise_label,
-                    "noise_confidence": result.noise_conf if result.noise_conf is not None else 0,
-                    "model_source": model_source,
-                    "acoustic_insights": acoustic_insights if 'acoustic_insights' in locals() else [],
-                    "recommendations": [],
-                    "spectrogram_path": None  # Will be set if spectrogram is available
-                }
-                
-                # Try to save spectrogram image for PDF embedding
-                try:
-                    if 'spec_db' in locals() and 'time_axis' in locals() and 'freq_axis' in locals():
-                        spectrogram_img_path = os.path.join(tempfile.gettempdir(), f"spectrogram_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
-                        saved_path = save_spectrogram_image(spec_db, time_axis, freq_axis, spectrogram_img_path)
-                        if saved_path:
-                            analysis_data["spectrogram_path"] = saved_path
-                except Exception as e:
-                    st.warning(f"Could not prepare spectrogram for PDF: {e}")
-                
-                # Add recommendations if available
-                if result.health_label in ("Degraded", "Stressed") or result.noise_label == "High":
-                    if result.health_label in ("Degraded", "Stressed") and result.noise_label == "High":
-                        analysis_data["recommendations"] = [
-                            "Report vessel activity to local authorities immediately",
-                            "Document noise sources (boat registration, time, location)",
-                            "Establish emergency quiet zones around the reef",
-                            "Contact marine patrol for enforcement",
-                            "Water quality testing for pollution sources",
-                            "Habitat assessment for physical damage"
-                        ]
-                    elif result.health_label in ("Degraded", "Stressed"):
-                        analysis_data["recommendations"] = [
-                            "Water quality testing (nutrients, temperature, pH, turbidity)",
-                            "Bleaching assessment and heat stress monitoring",
-                            "Pollution source investigation (runoff, sewage, agricultural)",
-                            "Habitat restoration planning and implementation"
-                        ]
-                    elif result.noise_label == "High":
-                        analysis_data["recommendations"] = [
-                            "Monitor noise impact on reef ecosystem",
-                            "Report excessive vessel traffic to authorities",
-                            "Advocate for speed limits and quiet zones",
-                            "Document noise patterns and sources"
-                        ]
-                
-                # Generate PDF report
-                if st.button("📄 Generate Comprehensive PDF Report", type="primary"):
-                    with st.spinner("Generating PDF report..."):
-                        pdf_path = generate_pdf_report(analysis_data)
-                        
-                        if pdf_path and os.path.exists(pdf_path):
-                            # Read the PDF file
-                            with open(pdf_path, "rb") as pdf_file:
-                                pdf_bytes = pdf_file.read()
-                            
-                            # Create download button
-                            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                            filename = f"Acoustic_Reef_Report_{timestamp}.pdf"
-                            
-                            st.download_button(
-                                label="📥 Download Full Report (PDF)",
-                                data=pdf_bytes,
-                                file_name=filename,
-                                mime="application/pdf",
-                                help="Download a comprehensive PDF report with all analysis results, visualizations, and recommendations"
-                            )
-                            
-                            # Clean up temporary files
-                            try:
-                                os.unlink(pdf_path)
-                                # Also clean up spectrogram image if it was created
-                                if analysis_data.get("spectrogram_path") and os.path.exists(analysis_data["spectrogram_path"]):
-                                    os.unlink(analysis_data["spectrogram_path"])
-                            except Exception:
-                                pass
-                        else:
-                            st.error("Failed to generate PDF report. Please try again.")
                     
             except Exception as e:
                 st.warning(f"Enhanced probability visualization not available: {e}")
@@ -1563,62 +1272,62 @@ def run_batch_upload(batch_files):
                 col1, col2, col3 = st.columns(3)
                 
                 with col1:
-                        st.metric("Distance Moved", f"{distance_moved:.2f}")
+                    st.metric("Distance Moved", f"{distance_moved:.2f}")
                 with col2:
-                        st.metric("Time Span", f"{(end_point['date'] - start_point['date']).days} days")
+                    st.metric("Time Span", f"{(end_point['date'] - start_point['date']).days} days")
                 with col3:
-                        if distance_moved > 3:
-                            trend_text = "Significant Change"
-                            trend_color = "🔴"
-                        elif distance_moved > 1:
-                            trend_text = "Moderate Change"
-                            trend_color = "🟡"
-                        else:
-                            trend_text = "Stable"
-                            trend_color = "🟢"
-                        st.metric("Acoustic Stability", f"{trend_color} {trend_text}")
+                    if distance_moved > 3:
+                        trend_text = "Significant Change"
+                        trend_color = "🔴"
+                    elif distance_moved > 1:
+                        trend_text = "Moderate Change"
+                        trend_color = "🟡"
+                    else:
+                        trend_text = "Stable"
+                        trend_color = "🟢"
+                    st.metric("Acoustic Stability", f"{trend_color} {trend_text}")
                 
                 # Health trend analysis
                 health_trend = trajectory_df['label'].tolist()
                 if len(set(health_trend)) > 1:
-                        st.warning("⚠️ **Health Status Changed**: Your recordings show different health classifications over time. This may indicate environmental changes or measurement variations.")
+                    st.warning("⚠️ **Health Status Changed**: Your recordings show different health classifications over time. This may indicate environmental changes or measurement variations.")
                 else:
-                        st.success("✅ **Consistent Health Status**: All recordings show the same health classification.")
+                    st.success("✅ **Consistent Health Status**: All recordings show the same health classification.")
             
-                else:
+            else:
                 # Regular scatter plot without trajectory
-                st.markdown("#### 🎯 Acoustic Distribution")
-                st.markdown("Your recordings plotted against the training data acoustic landscape:")
-                
-                # Create enhanced scatter plot with base data and user points
-                fig = create_enhanced_scatter_plot(base_df, cluster_labels, cluster_info)
-                
-                # Add user points
-                for i, row in user_df.iterrows():
-                    fig.add_trace(go.Scatter(
-                    x=[row['x']],
-                    y=[row['y']],
-                    mode='markers',
+                    st.markdown("#### 🎯 Acoustic Distribution")
+                    st.markdown("Your recordings plotted against the training data acoustic landscape:")
+                    
+                    # Create enhanced scatter plot with base data and user points
+                    fig = create_enhanced_scatter_plot(base_df, cluster_labels, cluster_info)
+                    
+                    # Add user points
+                    for i, row in user_df.iterrows():
+                        fig.add_trace(go.Scatter(
+                            x=[row['x']],
+                            y=[row['y']],
+                            mode='markers',
                 marker=dict(
                                 symbol="star",
                                 size=15,
                                 color="red" if row['health_status'] == 'Degraded' else "blue",
                                 line=dict(width=2, color="white")
-                    ),
-                    name=f"Your Recording: {row['filename']}",
-                    hovertemplate=f"<b>{row['filename']}</b><br>" +
+                            ),
+                            name=f"Your Recording: {row['filename']}",
+                            hovertemplate=f"<b>{row['filename']}</b><br>" +
                                          f"Health: {row['health_status']}<br>" +
                                          "Position: (%{x:.2f}, %{y:.2f})<br>" +
                                          "<extra></extra>"
-                    ))
+                        ))
             
             st.plotly_chart(fig, use_container_width=True)
             
             # Show clustering insights
-                st.markdown("#### 🔍 Acoustic Clustering Insights")
-                col1, col2 = st.columns(2)
+            st.markdown("#### 🔍 Acoustic Clustering Insights")
+            col1, col2 = st.columns(2)
             
-                with col1:
+            with col1:
                 st.markdown("**Clustering Analysis:**")
                 if len(user_df) > 1:
                     # Calculate spread
@@ -1636,15 +1345,15 @@ def run_batch_upload(batch_files):
                 else:
                     st.write("• Upload more files to see clustering patterns")
             
-                with col2:
+            with col2:
                 st.markdown("**Health Distribution:**")
                 health_counts = user_df['health_status'].value_counts()
                 for health, count in health_counts.items():
                     percentage = (count / len(user_df)) * 100
                     st.write(f"• **{health}**: {count} files ({percentage:.0f}%)")
             
-            else:
-                # Fallback to simple visualization without base data
+            # Fallback to simple visualization without base data
+            if base_df is None or base_df.empty:
                 st.warning("Base UMAP data not available. Showing simplified visualization.")
                 
                 # Simple scatter plot
