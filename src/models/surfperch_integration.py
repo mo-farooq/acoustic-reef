@@ -90,7 +90,7 @@ class SurfPerchModel:
         
         return PlaceholderModel()
     
-    def generate_embeddings(self, audio_data: np.ndarray, sample_rate: int = 22050) -> np.ndarray:
+    def generate_embeddings(self, audio_data: np.ndarray, sample_rate: int = 32000) -> np.ndarray:
         """
         Generate embeddings from audio data using SurfPerch
         
@@ -182,8 +182,8 @@ class SurfPerchModel:
             Preprocessed audio data
         """
         try:
-            # Resample if necessary (SurfPerch typically expects 22.05kHz)
-            target_sr = 22050
+            # Resample if necessary (SurfPerch expects 32kHz)
+            target_sr = 32000
             if sample_rate != target_sr:
                 try:
                     import librosa  # type: ignore
@@ -230,7 +230,7 @@ class SurfPerchModel:
                 processed_audio = self.preprocess_audio(audio, sr)
                 
                 # Generate embeddings
-                embeddings = self.generate_embeddings(processed_audio, 22050)
+                embeddings = self.generate_embeddings(processed_audio, 32000)
                 embeddings_list.append(embeddings[0])  # Remove batch dimension
             
             return np.array(embeddings_list)
@@ -251,5 +251,5 @@ class SurfPerchModel:
             'model_path': self.model_path,
             'model_type': 'SurfPerch',
             'embedding_dim': int(config.SURFPERCH_SETTINGS.get("embedding_dim", 512)),
-            'target_sample_rate': 22050
+            'target_sample_rate': 32000
         }

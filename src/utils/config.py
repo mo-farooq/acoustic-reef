@@ -46,7 +46,7 @@ UMAP_MODEL_PATH = CLASSIFIER_MODEL_DIR / "umap_model.joblib"
 
 # Audio processing settings
 AUDIO_SETTINGS = {
-    "target_sample_rate": 22050,
+    "target_sample_rate": 32000,
     "max_duration": 60.0,  # seconds
     "min_duration": 1.0,   # seconds
     "hop_length": 512,
@@ -57,7 +57,7 @@ AUDIO_SETTINGS = {
 # SurfPerch model settings
 SURFPERCH_SETTINGS = {
     "embedding_dim": 1280,  # Kaggle export embeddings
-    "target_sample_rate": 22050,
+    "target_sample_rate": 32000,
     "model_path": SURFPERCH_TF_SAVEDMODEL_DIR
 }
 

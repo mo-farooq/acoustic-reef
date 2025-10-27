@@ -6,6 +6,8 @@ AI-powered stethoscope for the ocean
 import streamlit as st
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
 # import librosa  # Commented out for now due to installation issues
 # import matplotlib.pyplot as plt  # Commented out for now due to installation issues
 # import seaborn as sns  # Commented out for now due to installation issues
@@ -14,6 +16,10 @@ import tempfile
 import os
 import wave
 import contextlib
+import hashlib
+import datetime
+import base64
+from fpdf import FPDF
 
 from src.models.surfperch_integration import SurfPerchModel
 from src.utils.config import SURFPERCH_SETTINGS, EMBEDDINGS_CSV, MASTER_DATASET_CSV, RF_MODEL_PATH
@@ -23,10 +29,269 @@ from src.inference import (
     load_umap_coordinates,
     transform_with_umap,
 )
+from src.utils.acoustic_map_enhancements import (
+    identify_acoustic_clusters,
+    create_enhanced_scatter_plot,
+    analyze_nearest_neighbors,
+    create_trajectory_plot,
+    generate_acoustic_insights
+)
 from src.simple_inference import predict_simple
 from src.mock_classifier import predict_with_mock_classifier
 from src.force_real_classifier import predict_with_force_classifier
 from src.real_model_loader import predict_with_real_model
+
+# Caching functions for performance optimization
+@st.cache_data
+def load_umap_data_cached():
+    """Cached function to load UMAP coordinates"""
+    return load_umap_coordinates()
+
+@st.cache_data
+def load_cluster_data_cached(base_df):
+    """Cached function to identify acoustic clusters"""
+    if base_df is not None and not base_df.empty:
+        return identify_acoustic_clusters(base_df, method='kmeans', n_clusters=3)
+    return None, None
+
+@st.cache_data
+def compute_spectrogram_cached(audio_data, sample_rate, duration):
+    """Cached function to compute spectrogram"""
+    import numpy as _np
+    
+    win = 2048
+    hop = 512
+    num_frames = max(1, (len(audio_data) - win) // hop + 1)
+    window = _np.hanning(win)
+    
+    spec = []
+    for i in range(num_frames):
+        start = i * hop
+        frame = audio_data[start:start+win]
+        if len(frame) < win:
+            frame = _np.pad(frame, (0, win - len(frame)))
+        windowed_frame = frame * window
+        fft_result = _np.fft.rfft(windowed_frame)
+        mag = _np.abs(fft_result)
+        spec.append(mag)
+    
+    spec = _np.array(spec).T
+    spec_db = 20 * _np.log10(spec + 1e-10)
+    time_axis = _np.linspace(0, duration, spec.shape[1])
+    freq_axis = _np.linspace(0, sample_rate/2, spec.shape[0])
+    
+    return spec_db, time_axis, freq_axis
+
+@st.cache_resource
+def load_model_cached():
+    """Cached function to load the trained model"""
+    try:
+        import joblib
+        from src.utils.config import RF_MODEL_PATH
+        if os.path.exists(RF_MODEL_PATH):
+            return joblib.load(RF_MODEL_PATH)
+        return None
+    except Exception:
+        return None
+
+def save_spectrogram_image(spec_db, time_axis, freq_axis, output_path):
+    """
+    Save spectrogram data as a PNG image for PDF embedding.
+    
+    Args:
+        spec_db: Spectrogram data in dB
+        time_axis: Time axis data
+        freq_axis: Frequency axis data
+        output_path: Path to save the image
+        
+    Returns:
+        str: Path to the saved image file
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib
+        matplotlib.use('Agg')  # Use non-interactive backend
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=(12, 8))
+        
+        # Plot spectrogram
+        im = ax.imshow(spec_db, aspect='auto', origin='lower', 
+                      extent=[time_axis[0], time_axis[-1], freq_axis[0], freq_axis[-1]],
+                      cmap='viridis')
+        
+        # Set labels and title
+        ax.set_xlabel('Time (seconds)')
+        ax.set_ylabel('Frequency (Hz)')
+        ax.set_title('Audio Spectrogram Analysis')
+        
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('Power (dB)')
+        
+        # Save image
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        return output_path
+        
+    except Exception as e:
+        st.warning(f"Could not save spectrogram image: {e}")
+        return None
+
+def generate_pdf_report(analysis_data):
+    """
+    Generate a comprehensive PDF report summarizing the Acoustic Reef analysis results.
+    
+    Args:
+        analysis_data (dict): Dictionary containing all analysis results
+        
+    Returns:
+        str: Path to the generated PDF file
+    """
+    try:
+        # Create PDF object
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        
+        # Set up fonts
+        pdf.set_font('Arial', 'B', 20)
+        
+        # Header Section
+        pdf.cell(0, 10, 'Acoustic Reef Analysis Report', 0, 1, 'C')
+        pdf.ln(5)
+        
+        # Date and time
+        pdf.set_font('Arial', '', 12)
+        current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        pdf.cell(0, 8, f'Generated on: {current_time}', 0, 1, 'C')
+        pdf.ln(10)
+        
+        # Input Details Section
+        pdf.set_font('Arial', 'B', 14)
+        pdf.cell(0, 8, 'Input Details', 0, 1)
+        pdf.set_font('Arial', '', 12)
+        pdf.cell(0, 6, f'Filename: {analysis_data.get("filename", "Unknown")}', 0, 1)
+        pdf.cell(0, 6, f'Duration: {analysis_data.get("duration", "N/A")} seconds', 0, 1)
+        pdf.cell(0, 6, f'Sample Rate: {analysis_data.get("sample_rate", "N/A")} Hz', 0, 1)
+        pdf.cell(0, 6, f'Channels: {analysis_data.get("channels", "N/A")}', 0, 1)
+        pdf.ln(10)
+        
+        # Overall Assessment Section
+        pdf.set_font('Arial', 'B', 14)
+        pdf.cell(0, 8, 'Overall Assessment (Vital Signs)', 0, 1)
+        pdf.set_font('Arial', '', 12)
+        
+        # Health Status
+        health_status = analysis_data.get("health_status", "Unknown")
+        health_confidence = analysis_data.get("health_confidence", 0)
+        pdf.cell(0, 6, f'Reef Health: {health_status}', 0, 1)
+        pdf.cell(0, 6, f'Health Confidence: {health_confidence:.1%}', 0, 1)
+        pdf.ln(3)
+        
+        # Noise Status
+        noise_status = analysis_data.get("noise_status", "Unknown")
+        noise_confidence = analysis_data.get("noise_confidence", 0)
+        pdf.cell(0, 6, f'Noise Pollution: {noise_status}', 0, 1)
+        pdf.cell(0, 6, f'Noise Confidence: {noise_confidence:.1%}', 0, 1)
+        pdf.ln(3)
+        
+        # Model Source
+        model_source = analysis_data.get("model_source", "Unknown")
+        pdf.cell(0, 6, f'Analysis Method: {model_source}', 0, 1)
+        pdf.ln(10)
+        
+        # Visual Evidence Section
+        pdf.set_font('Arial', 'B', 14)
+        pdf.cell(0, 8, 'Visual Evidence', 0, 1)
+        pdf.set_font('Arial', '', 12)
+        
+        # Add spectrogram if available
+        spectrogram_path = analysis_data.get("spectrogram_path")
+        if spectrogram_path and os.path.exists(spectrogram_path):
+            try:
+                pdf.cell(0, 6, 'Spectrogram Analysis:', 0, 1)
+                pdf.image(spectrogram_path, x=10, w=180)
+                pdf.ln(5)
+            except Exception as e:
+                pdf.cell(0, 6, f'Spectrogram could not be embedded: {str(e)}', 0, 1)
+        else:
+            pdf.cell(0, 6, 'Spectrogram: Not available', 0, 1)
+            pdf.cell(0, 6, 'Note: Spectrogram visualization requires matplotlib to be installed', 0, 1)
+        
+        pdf.ln(10)
+        
+        # Acoustic Map Insights Section
+        pdf.set_font('Arial', 'B', 14)
+        pdf.cell(0, 8, 'Acoustic Map Insights', 0, 1)
+        pdf.set_font('Arial', '', 12)
+        
+        acoustic_insights = analysis_data.get("acoustic_insights", [])
+        if acoustic_insights:
+            for insight in acoustic_insights:
+                pdf.cell(0, 6, f'• {insight}', 0, 1)
+        else:
+            pdf.cell(0, 6, 'No acoustic map insights available', 0, 1)
+        
+        pdf.ln(10)
+        
+        # Action Recommendations Section
+        pdf.set_font('Arial', 'B', 14)
+        pdf.cell(0, 8, 'Action Recommendations', 0, 1)
+        pdf.set_font('Arial', '', 12)
+        
+        recommendations = analysis_data.get("recommendations", [])
+        if recommendations:
+            for i, rec in enumerate(recommendations, 1):
+                pdf.cell(0, 6, f'{i}. {rec}', 0, 1)
+        else:
+            pdf.cell(0, 6, 'No specific recommendations available', 0, 1)
+        
+        pdf.ln(10)
+        
+        # Contact Information Section
+        pdf.set_font('Arial', 'B', 14)
+        pdf.cell(0, 8, 'Contact Information', 0, 1)
+        pdf.set_font('Arial', '', 12)
+        
+        contact_info = [
+            "For immediate reef health concerns:",
+            "• Local Marine Patrol: [Contact your local authorities]",
+            "• Marine Conservation Organizations:",
+            "  - Reef Check Foundation",
+            "  - Coral Reef Alliance",
+            "  - Local Marine Protected Area Management",
+            "",
+            "For scientific collaboration:",
+            "• Marine Biology Departments at local universities",
+            "• NOAA Coral Reef Conservation Program",
+            "• International Coral Reef Initiative"
+        ]
+        
+        for info in contact_info:
+            pdf.cell(0, 6, info, 0, 1)
+        
+        pdf.ln(10)
+        
+        # Footer
+        pdf.set_font('Arial', 'I', 10)
+        pdf.cell(0, 6, 'This report was generated by Acoustic Reef - AI-powered stethoscope for the ocean', 0, 1, 'C')
+        pdf.cell(0, 6, 'For more information, visit: [Your Website URL]', 0, 1, 'C')
+        
+        # Save PDF to temporary file
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        pdf_filename = f"Acoustic_Reef_Report_{timestamp}.pdf"
+        pdf_path = os.path.join(tempfile.gettempdir(), pdf_filename)
+        
+        pdf.output(pdf_path)
+        
+        return pdf_path
+        
+    except Exception as e:
+        st.error(f"Error generating PDF report: {str(e)}")
+        return None
 
 # Page configuration
 st.set_page_config(
@@ -79,11 +344,31 @@ def main():
         st.header("🎛️ Controls")
         st.markdown("---")
         
-        # File upload
+        # File upload with enhanced guidance
+        st.markdown("#### 🎤 Upload Your Recording")
+        
+        # Pre-upload guidance
+        with st.expander("📋 Recording Guidelines", expanded=True):
+            st.markdown("""
+            **For best results, follow these guidelines:**
+            
+            **⏱️ Duration**: 5-60 seconds (30-60 seconds ideal)
+            **🔊 Quality**: Clear audio with minimal handling noise
+            **🌊 Conditions**: Record during typical reef activity (daytime often best)
+            **📱 Equipment**: Use a hydrophone or waterproof microphone
+            **🌊 Environment**: Calm water, avoid boat traffic during recording
+            
+            **What to avoid:**
+            - Very short recordings (<5 seconds)
+            - Excessive background noise or clipping
+            - Recording during storms or heavy boat traffic
+            - Poor quality microphones or damaged equipment
+            """)
+        
         uploaded_file = st.file_uploader(
-            "Upload Audio File",
+            "Choose Audio File",
             type=['wav', 'mp3', 'flac'],
-            help="Upload a .wav file from your hydrophone recording"
+            help="Upload a hydrophone recording of your reef (WAV format recommended)"
         )
 
         # Batch upload (multiple files)
@@ -105,7 +390,7 @@ def main():
         # Analysis parameters
         sample_rate = st.selectbox(
             "Target Sample Rate",
-            [22050, 44100, 48000],
+            [32000, 44100, 48000],
             index=0,
             help="Sample rate for audio processing"
         )
@@ -130,7 +415,7 @@ def main():
         """)
     
     # Main content area with tabs
-    tabs = st.tabs(["Upload & Analyze", "Batch Predictions", "Acoustic Map"])
+    tabs = st.tabs(["🎤 Single Analysis", "📊 Batch Analysis", "🗺️ Acoustic Map & Diagnostics"])
     with tabs[0]:
         if uploaded_file is not None:
             analyze_audio(uploaded_file, sample_rate, duration_limit)
@@ -237,11 +522,48 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
             with col4:
                 st.metric("RMS Level", "—")
 
-            # Data quality warnings
+            # Enhanced data quality validation with specific feedback
+            quality_issues = []
+            quality_warnings = []
+            quality_info = []
+            
+            # Duration validation
             if duration_sec < 5:
-                st.warning("Audio is very short (<5s). Results may be unreliable.")
-            if duration_sec > duration_limit:
-                st.info("Only the first segment up to the Max Duration was analyzed.")
+                quality_issues.append("❌ **Too short**: Recording is less than 5 seconds")
+                quality_warnings.append("Results may be unreliable due to insufficient data")
+            elif duration_sec < 10:
+                quality_warnings.append("⚠️ **Short recording**: Consider recording for 30-60 seconds for better accuracy")
+            elif duration_sec > 300:
+                quality_warnings.append("⚠️ **Very long**: Only the first 5 minutes will be analyzed")
+            elif duration_sec > duration_limit:
+                quality_info.append("ℹ️ Only the first segment up to the Max Duration was analyzed")
+            
+            # Sample rate validation
+            if sr < 16000:
+                quality_issues.append("❌ **Low sample rate**: Below 16kHz may miss important frequencies")
+            elif sr < 22050:
+                quality_warnings.append("⚠️ **Low sample rate**: Consider recording at 32kHz or higher")
+            
+            # Channel validation
+            if n_channels > 2:
+                quality_warnings.append("⚠️ **Multiple channels**: Only the first channel will be used")
+            
+            # Display quality feedback
+            if quality_issues:
+                st.error("**Recording Quality Issues:**")
+                for issue in quality_issues:
+                    st.markdown(issue)
+                st.markdown("**Recommendation**: Please record a new audio file following the guidelines above.")
+                return
+            
+            if quality_warnings:
+                st.warning("**Recording Quality Warnings:**")
+                for warning in quality_warnings:
+                    st.markdown(warning)
+            
+            if quality_info:
+                for info in quality_info:
+                    st.info(info)
 
             # Inline audio playback
             st.audio(tmp_path, format='audio/wav')
@@ -262,37 +584,9 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
             try:
                 import plotly.express as px
                 import plotly.graph_objects as go
-                import numpy as _np
                 
-                # Compute enhanced spectrogram with better parameters
-                win = 2048  # Larger window for better frequency resolution
-                hop = 512   # 75% overlap for smoother visualization
-                num_frames = max(1, (len(audio_np) - win) // hop + 1)
-                
-                # Apply window function for better spectral analysis
-                window = _np.hanning(win)
-                
-                spec = []
-                for i in range(num_frames):
-                    start = i * hop
-                    frame = audio_np[start:start+win]
-                    if len(frame) < win:
-                        frame = _np.pad(frame, (0, win - len(frame)))
-                    
-                    # Apply window and compute FFT
-                    windowed_frame = frame * window
-                    fft_result = _np.fft.rfft(windowed_frame)
-                    mag = _np.abs(fft_result)
-                    spec.append(mag)
-                
-                spec = _np.array(spec).T  # [freq, time]
-                
-                # Convert to dB with better dynamic range
-                spec_db = 20 * _np.log10(spec + 1e-10)
-                
-                # Create time and frequency axes
-                time_axis = _np.linspace(0, duration_sec, spec.shape[1])
-                freq_axis = _np.linspace(0, sr/2, spec.shape[0])
+                # Use cached spectrogram computation
+                spec_db, time_axis, freq_axis = compute_spectrogram_cached(audio_np, sr, duration_sec)
                 
                 # Create enhanced spectrogram with modern styling
                 fig_s = go.Figure(data=go.Heatmap(
@@ -432,31 +726,52 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
 
             st.success(f"Using {source}; features shape: {feature_vals.shape}")
 
-            # Predict vital signs (health + noise)
+            # Predict vital signs (health + noise) with simplified fallback system
+            result = None
+            model_source = "Unknown"
+            model_warning = None
+            
+            # Primary: Try REAL trained model with robust error handling
             try:
-                # Try REAL trained model first
-                result = predict_with_real_model(feature_vals)
-                st.success("✅ Using REAL trained model!")
+                # Check if model file exists before attempting to load
+                from src.utils.config import RF_MODEL_PATH
+                if os.path.exists(RF_MODEL_PATH):
+                    result = predict_with_real_model(feature_vals)
+                    model_source = "Real Trained Model"
+                    st.success("✅ Using trained AI model - highest accuracy")
+                else:
+                    raise FileNotFoundError("Trained model file not found")
             except Exception as e_real:
-                # Fallback 1: force-compatible classifier
+                # Fallback: Mock classifier with clear explanation
                 try:
-                    result = predict_with_force_classifier(feature_vals)
-                    st.warning("🛠️ Real model missing/incompatible. Using force-compatible classifier.")
-                except Exception as e_force:
-                    # Fallback 2: mock classifier as last resort
-                    try:
-                        result = predict_with_mock_classifier(feature_vals)
-                        st.warning("ℹ️ Using mock classifier heuristic due to missing trained model.")
-                    except Exception as e_mock:
-                        st.error("Analysis failed during prediction. Please try again later.")
-                        return
+                    result = predict_with_mock_classifier(feature_vals)
+                    model_source = "Heuristic Analysis"
+                    model_warning = "⚠️ Using heuristic analysis due to missing trained model. Results are estimates based on audio characteristics."
+                    st.warning(model_warning)
+                except Exception as e_mock:
+                    st.error("❌ Analysis failed. Please check your audio file and try again.")
+                    st.error(f"Technical details: {str(e_mock)}")
+                    return
 
-            # Vital Signs UI
+            # Vital Signs UI with enhanced presentation
             st.markdown("### 🩺 Vital Signs")
             
-            # Debug output to see actual values
-            st.write(f"🔍 Debug - Health conf: {result.health_conf}, Noise conf: {result.noise_conf}")
-            st.write(f"🔍 Debug - Are they equal? {result.health_conf == result.noise_conf}")
+            # Model source indicator
+            if model_warning:
+                st.info(f"**Analysis Method**: {model_source}")
+            else:
+                st.success(f"**Analysis Method**: {model_source}")
+            
+            # Helper function for confidence interpretation
+            def get_confidence_level(conf):
+                if conf is None:
+                    return "Unknown", "❓"
+                elif conf >= 0.8:
+                    return "High", "🟢"
+                elif conf >= 0.5:
+                    return "Medium", "🟡"
+                else:
+                    return "Low", "🔴"
             
             col1, col2 = st.columns(2)
             with col1:
@@ -464,38 +779,166 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                 st.markdown("#### 🏥 Reef Health")
                 st.markdown(f'<p class="{color}">{result.health_label}</p>', unsafe_allow_html=True)
                 if result.health_conf is not None:
-                    st.metric("Confidence", f"{result.health_conf:.0%}")
+                    conf_level, conf_icon = get_confidence_level(result.health_conf)
+                    st.metric("Confidence", f"{result.health_conf:.0%} ({conf_level})", 
+                             help=f"{conf_icon} {conf_level} confidence - {'Very reliable' if conf_level == 'High' else 'Moderately reliable' if conf_level == 'Medium' else 'Low reliability, consider retaking recording'}")
             with col2:
                 st.markdown("#### 🔊 Noise Pollution")
                 color_n = "status-degraded" if result.noise_label == "High" else "status-healthy"
                 st.markdown(f'<p class="{color_n}">{result.noise_label}</p>', unsafe_allow_html=True)
                 if result.noise_conf is not None:
-                    st.metric("Confidence", f"{result.noise_conf:.0%}")
+                    conf_level, conf_icon = get_confidence_level(result.noise_conf)
+                    st.metric("Confidence", f"{result.noise_conf:.0%} ({conf_level})", 
+                             help=f"{conf_icon} {conf_level} confidence - {'Very reliable' if conf_level == 'High' else 'Moderately reliable' if conf_level == 'Medium' else 'Low reliability, consider retaking recording'}")
 
-            # Enhanced Class Probabilities Visualization
+            # Annotated Spectrogram based on predictions
+            st.markdown("### 🎵 Annotated Spectrogram Analysis")
+            try:
+                # Use cached spectrogram computation
+                import plotly.graph_objects as go
+                spec_db, time_axis, freq_axis = compute_spectrogram_cached(audio_np, sr, duration_sec)
+                
+                # Create annotated spectrogram
+                fig_annotated = go.Figure()
+                
+                # Add the spectrogram
+                fig_annotated.add_trace(go.Heatmap(
+                    z=spec_db,
+                    x=time_axis,
+                    y=freq_axis,
+                    colorscale='Viridis',
+                    colorbar=dict(
+                        title=dict(text="Power (dB)", font=dict(size=12)),
+                        len=0.8
+                    ),
+                    hovertemplate='<b>Time:</b> %{x:.2f}s<br><b>Frequency:</b> %{y:.0f} Hz<br><b>Power:</b> %{z:.1f} dB<extra></extra>',
+                    name="Spectrogram"
+                ))
+                
+                # Add frequency band annotations based on predictions
+                annotations = []
+                shapes = []
+                
+                # Define frequency bands
+                low_freq_max = 200
+                mid_freq_max = 2000
+                
+                # Add frequency band highlights
+                if result.noise_label == "High":
+                    # Highlight low frequency bands for boat noise
+                    shapes.append(dict(
+                        type="rect",
+                        x0=0, x1=duration_sec,
+                        y0=0, y1=low_freq_max,
+                        fillcolor="red",
+                        opacity=0.2,
+                        line=dict(width=2, color="red"),
+                        name="Boat Noise Zone"
+                    ))
+                    annotations.append(dict(
+                        x=duration_sec/2, y=low_freq_max/2,
+                        text="🚢 Boat Noise<br>Detected",
+                        showarrow=True,
+                        arrowhead=2,
+                        arrowcolor="red",
+                        font=dict(color="red", size=12),
+                        bgcolor="white",
+                        bordercolor="red"
+                    ))
+                
+                if result.health_label == "Healthy":
+                    # Highlight mid frequency bands for healthy reef sounds
+                    shapes.append(dict(
+                        type="rect",
+                        x0=0, x1=duration_sec,
+                        y0=low_freq_max, y1=mid_freq_max,
+                        fillcolor="green",
+                        opacity=0.2,
+                        line=dict(width=2, color="green"),
+                        name="Healthy Reef Zone"
+                    ))
+                    annotations.append(dict(
+                        x=duration_sec/2, y=(low_freq_max + mid_freq_max)/2,
+                        text="🐠 Healthy Reef<br>Activity",
+                        showarrow=True,
+                        arrowhead=2,
+                        arrowcolor="green",
+                        font=dict(color="green", size=12),
+                        bgcolor="white",
+                        bordercolor="green"
+                    ))
+                elif result.health_label == "Degraded":
+                    # Highlight high frequency bands for degraded reef
+                    shapes.append(dict(
+                        type="rect",
+                        x0=0, x1=duration_sec,
+                        y0=mid_freq_max, y1=sr/2,
+                        fillcolor="orange",
+                        opacity=0.2,
+                        line=dict(width=2, color="orange"),
+                        name="Degraded Zone"
+                    ))
+                    annotations.append(dict(
+                        x=duration_sec/2, y=(mid_freq_max + sr/2)/2,
+                        text="⚠️ Degraded<br>Reef Sounds",
+                        showarrow=True,
+                        arrowhead=2,
+                        arrowcolor="orange",
+                        font=dict(color="orange", size=12),
+                        bgcolor="white",
+                        bordercolor="orange"
+                    ))
+                
+                # Update layout with annotations
+                fig_annotated.update_layout(
+                    title=dict(
+                        text="🎵 AI-Annotated Spectrogram",
+                        font=dict(size=16, color='#2c3e50'),
+                        x=0.5
+                    ),
+                    xaxis=dict(title="Time (seconds)", showgrid=True),
+                    yaxis=dict(title="Frequency (Hz)", showgrid=True),
+                    height=500,
+                    shapes=shapes,
+                    annotations=annotations
+                )
+                
+                st.plotly_chart(fig_annotated, use_container_width=True)
+                
+                # Add explanation
+                with st.expander("🔍 What do the highlighted areas mean?", expanded=False):
+                    if result.noise_label == "High":
+                        st.markdown("**🔴 Red highlighted area (0-200 Hz)**: Boat engine noise detected in low frequencies")
+                    if result.health_label == "Healthy":
+                        st.markdown("**🟢 Green highlighted area (200-2000 Hz)**: Rich marine life sounds indicating healthy reef")
+                    elif result.health_label == "Degraded":
+                        st.markdown("**🟠 Orange highlighted area (2000+ Hz)**: Reduced biodiversity sounds, indicating reef stress")
+                    
+                    st.markdown("""
+                    **Understanding the colors:**
+                    - **Darker areas**: Quieter sounds
+                    - **Brighter areas**: Louder sounds
+                    - **Highlighted zones**: Key frequency bands that influenced the AI's decision
+                    """)
+                    
+            except Exception as e:
+                st.warning(f"Could not generate annotated spectrogram: {e}")
+
+            # Simplified Model Analysis - Focus on key insights
             try:
                 import joblib
                 import plotly.graph_objects as go
-                from plotly.subplots import make_subplots
                 from src.utils.config import RF_MODEL_PATH
-                model = joblib.load(RF_MODEL_PATH)
-                if hasattr(model, "predict_proba") and hasattr(model, "classes_"):
+                
+                # Only show detailed analysis if using real model
+                model = load_model_cached()
+                if model is not None and hasattr(model, "predict_proba") and hasattr(model, "classes_"):
                     probs = model.predict_proba(feature_vals)[0]
                     cls_to_prob = {str(c): float(p) for c, p in zip(model.classes_, probs)}
                     
-                    st.markdown("### 📊 Model Confidence Analysis")
+                    st.markdown("### 📊 AI Analysis Details")
                     
-                    # Create enhanced visualization with multiple charts
-                    fig = make_subplots(
-                        rows=2, cols=2,
-                        subplot_titles=("Class Probabilities", "Confidence Distribution", "Prediction Certainty", "Model Insights"),
-                        specs=[[{"type": "bar"}, {"type": "pie"}],
-                               [{"type": "indicator"}, {"type": "bar"}]],
-                        vertical_spacing=0.15,
-                        horizontal_spacing=0.1
-                    )
-                    
-                    # 1. Enhanced Bar Chart with custom colors and styling
+                    # Simplified single chart focusing on key information
                     class_names = list(cls_to_prob.keys())
                     probabilities = list(cls_to_prob.values())
                     
@@ -507,8 +950,8 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                     }
                     colors = [color_map.get(cls, '#6A5ACD') for cls in class_names]
                     
-                    # Bar chart with enhanced styling
-                    fig.add_trace(
+                    # Create simple, clear bar chart
+                    fig = go.Figure(data=[
                         go.Bar(
                             x=class_names,
                             y=probabilities,
@@ -520,145 +963,162 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                             text=[f"{p:.1%}" for p in probabilities],
                             textposition='auto',
                             textfont=dict(size=14, color='white', family='Arial Black'),
-                            name="Probability",
-                            showlegend=False
-                        ),
-                        row=1, col=1
-                    )
-                    
-                    # 2. Pie chart for probability distribution
-                    fig.add_trace(
-                        go.Pie(
-                            labels=class_names,
-                            values=probabilities,
-                            marker=dict(colors=colors, line=dict(color='white', width=2)),
-                            textinfo='label+percent',
-                            textfont=dict(size=12, family='Arial'),
-                            hovertemplate='<b>%{label}</b><br>Probability: %{percent}<br>Value: %{value:.3f}<extra></extra>',
-                            name="Distribution"
-                        ),
-                        row=1, col=2
-                    )
-                    
-                    # 3. Confidence gauge
-                    max_prob = max(probabilities)
-                    fig.add_trace(
-                        go.Indicator(
-                            mode="gauge+number+delta",
-                            value=max_prob * 100,
-                            domain={'x': [0, 1], 'y': [0, 1]},
-                            title={'text': "Model Confidence (%)"},
-                            delta={'reference': 50},
-                            gauge={
-                                'axis': {'range': [None, 100]},
-                                'bar': {'color': "darkblue"},
-                                'steps': [
-                                    {'range': [0, 50], 'color': "lightgray"},
-                                    {'range': [50, 80], 'color': "yellow"},
-                                    {'range': [80, 100], 'color': "green"}
-                                ],
-                                'threshold': {
-                                    'line': {'color': "red", 'width': 4},
-                                    'thickness': 0.75,
-                                    'value': 90
-                                }
-                            }
-                        ),
-                        row=2, col=1
-                    )
-                    
-                    # 4. Model insights bar chart
-                    insights_data = {
-                        'Model Certainty': max_prob,
-                        'Prediction Spread': max(probabilities) - min(probabilities),
-                        'Second Best': sorted(probabilities, reverse=True)[1],
-                        'Uncertainty': 1 - max_prob
-                    }
-                    
-                    fig.add_trace(
-                        go.Bar(
-                            x=list(insights_data.keys()),
-                            y=list(insights_data.values()),
-                            marker=dict(
-                                color=['#4CAF50', '#FF9800', '#2196F3', '#F44336'],
-                                opacity=0.7
-                            ),
-                            text=[f"{v:.3f}" for v in insights_data.values()],
-                            textposition='auto',
-                            name="Insights",
-                            showlegend=False
-                        ),
-                        row=2, col=2
-                    )
-                    
-                    # Update layout with modern styling
+                                name="AI Confidence"
+                            )
+                        ])
+                        
+                        # Update layout for clarity
                     fig.update_layout(
                         title=dict(
-                            text="🎯 AI Model Decision Breakdown",
-                            font=dict(size=20, color='#1f77b4', family='Arial, sans-serif'),
+                                text="🎯 AI Confidence Breakdown",
+                                font=dict(size=16, color='#2c3e50'),
                             x=0.5,
                             xanchor='center'
                         ),
-                        height=600,
+                            height=400,
                         showlegend=False,
                         plot_bgcolor='rgba(248,249,250,0.8)',
                         paper_bgcolor='rgba(255,255,255,0.9)',
-                        font=dict(family='Arial, sans-serif', size=12)
+                            font=dict(family='Arial, sans-serif', size=12),
+                            xaxis=dict(title="Prediction Categories"),
+                            yaxis=dict(title="Confidence Level", range=[0, 1])
                     )
-                    
-                    # Update axes styling
-                    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
-                    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
                     
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    # Add interpretation section
-                    with st.expander("🧠 Model Interpretation", expanded=True):
-                        st.markdown("""
-                        **What this analysis shows:**
-                        
-                        - **Class Probabilities**: How confident the AI is about each possible outcome
-                        - **Confidence Distribution**: Visual breakdown of model certainty
-                        - **Model Confidence**: Overall certainty level (higher = more confident)
-                        - **Model Insights**: Key metrics about the prediction quality
-                        
-                        **Understanding the results:**
-                        - **High confidence (>80%)**: Model is very certain about the prediction
-                        - **Medium confidence (50-80%)**: Some uncertainty, but still reliable
-                        - **Low confidence (<50%)**: High uncertainty, consider retaking the recording
-                        
-                        **Class meanings:**
-                        - **Healthy**: Reef shows signs of good health and biodiversity
-                        - **Degraded**: Reef shows signs of stress or damage
-                        - **Anthrophony**: Human-made noise detected (boats, engines, etc.)
-                        """)
+                    # Key metrics in simple format
+                    max_prob = max(probabilities)
+                    second_best = sorted(probabilities, reverse=True)[1]
                     
-                    # Enhanced metrics display
                     col1, col2, col3 = st.columns(3)
                     with col1:
                         st.metric("Highest Confidence", f"{max_prob:.1%}", 
                                 delta=f"{max_prob - 0.5:.1%}" if max_prob > 0.5 else None)
                     with col2:
-                        second_best = sorted(probabilities, reverse=True)[1]
                         st.metric("Second Best", f"{second_best:.1%}")
                     with col3:
                         uncertainty = 1 - max_prob
                         st.metric("Uncertainty", f"{uncertainty:.1%}")
                     
-                    # Downloadable CSV with enhanced data
+                        # Simple interpretation
+                        with st.expander("ℹ️ What do these results mean?", expanded=False):
+                            st.markdown("""
+                            **Understanding the AI analysis:**
+                            
+                            - **High confidence (>80%)**: Very reliable results
+                            - **Medium confidence (50-80%)**: Good results, some uncertainty
+                            - **Low confidence (<50%)**: Consider retaking the recording
+                            
+                            **What each category means:**
+                            - **Healthy**: Reef shows good biodiversity and natural sounds
+                            - **Degraded**: Reef shows signs of stress or damage  
+                            - **Anthrophony**: Human-made noise detected (boats, engines)
+                            """)
+                        
+                        # Download option
                     enhanced_data = {
                         **cls_to_prob,
                         'max_confidence': max_prob,
-                        'uncertainty': 1 - max_prob,
-                        'prediction_spread': max(probabilities) - min(probabilities)
+                            'uncertainty': 1 - max_prob
                     }
                     csv_bytes = pd.DataFrame([enhanced_data]).to_csv(index=False).encode("utf-8")
                     st.download_button(
-                        "📥 Download Enhanced Analysis (CSV)", 
+                            "📥 Download Analysis Results (CSV)", 
                         data=csv_bytes, 
-                        file_name="enhanced_prediction_analysis.csv", 
+                            file_name="reef_analysis_results.csv", 
                         mime="text/csv"
                     )
+                else:
+                    st.info("📊 Detailed AI analysis available with trained model")
+                
+                # PDF Report Generation Section
+                st.markdown("---")
+                st.markdown("### 📄 Comprehensive Report")
+                
+                # Collect all analysis data for PDF report
+                analysis_data = {
+                    "filename": uploaded_file.name if uploaded_file else "Unknown",
+                    "duration": f"{duration_sec:.1f}",
+                    "sample_rate": f"{sr:,}",
+                    "channels": "Mono" if n_channels == 1 else f"{n_channels} ch",
+                    "health_status": result.health_label,
+                    "health_confidence": result.health_conf if result.health_conf is not None else 0,
+                    "noise_status": result.noise_label,
+                    "noise_confidence": result.noise_conf if result.noise_conf is not None else 0,
+                    "model_source": model_source,
+                    "acoustic_insights": acoustic_insights if 'acoustic_insights' in locals() else [],
+                    "recommendations": [],
+                    "spectrogram_path": None  # Will be set if spectrogram is available
+                }
+                
+                # Try to save spectrogram image for PDF embedding
+                try:
+                    if 'spec_db' in locals() and 'time_axis' in locals() and 'freq_axis' in locals():
+                        spectrogram_img_path = os.path.join(tempfile.gettempdir(), f"spectrogram_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+                        saved_path = save_spectrogram_image(spec_db, time_axis, freq_axis, spectrogram_img_path)
+                        if saved_path:
+                            analysis_data["spectrogram_path"] = saved_path
+                except Exception as e:
+                    st.warning(f"Could not prepare spectrogram for PDF: {e}")
+                
+                # Add recommendations if available
+                if result.health_label in ("Degraded", "Stressed") or result.noise_label == "High":
+                    if result.health_label in ("Degraded", "Stressed") and result.noise_label == "High":
+                        analysis_data["recommendations"] = [
+                            "Report vessel activity to local authorities immediately",
+                            "Document noise sources (boat registration, time, location)",
+                            "Establish emergency quiet zones around the reef",
+                            "Contact marine patrol for enforcement",
+                            "Water quality testing for pollution sources",
+                            "Habitat assessment for physical damage"
+                        ]
+                    elif result.health_label in ("Degraded", "Stressed"):
+                        analysis_data["recommendations"] = [
+                            "Water quality testing (nutrients, temperature, pH, turbidity)",
+                            "Bleaching assessment and heat stress monitoring",
+                            "Pollution source investigation (runoff, sewage, agricultural)",
+                            "Habitat restoration planning and implementation"
+                        ]
+                    elif result.noise_label == "High":
+                        analysis_data["recommendations"] = [
+                            "Monitor noise impact on reef ecosystem",
+                            "Report excessive vessel traffic to authorities",
+                            "Advocate for speed limits and quiet zones",
+                            "Document noise patterns and sources"
+                        ]
+                
+                # Generate PDF report
+                if st.button("📄 Generate Comprehensive PDF Report", type="primary"):
+                    with st.spinner("Generating PDF report..."):
+                        pdf_path = generate_pdf_report(analysis_data)
+                        
+                        if pdf_path and os.path.exists(pdf_path):
+                            # Read the PDF file
+                            with open(pdf_path, "rb") as pdf_file:
+                                pdf_bytes = pdf_file.read()
+                            
+                            # Create download button
+                            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                            filename = f"Acoustic_Reef_Report_{timestamp}.pdf"
+                            
+                            st.download_button(
+                                label="📥 Download Full Report (PDF)",
+                                data=pdf_bytes,
+                                file_name=filename,
+                                mime="application/pdf",
+                                help="Download a comprehensive PDF report with all analysis results, visualizations, and recommendations"
+                            )
+                            
+                            # Clean up temporary files
+                            try:
+                                os.unlink(pdf_path)
+                                # Also clean up spectrogram image if it was created
+                                if analysis_data.get("spectrogram_path") and os.path.exists(analysis_data["spectrogram_path"]):
+                                    os.unlink(analysis_data["spectrogram_path"])
+                            except Exception:
+                                pass
+                        else:
+                            st.error("Failed to generate PDF report. Please try again.")
                     
             except Exception as e:
                 st.warning(f"Enhanced probability visualization not available: {e}")
@@ -679,14 +1139,122 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
             with st.expander("What does confidence mean?"):
                 st.write("Confidence reflects the model's estimated probability for the predicted class based on SurfPerch embeddings. Recording length, background noise, and signal quality can affect confidence.")
 
-        # Take Action section
-        if result.health_label in ("Degraded", "Stressed"):
-            if st.button("Learn How to Take Action"):
+        # Enhanced Take Action section with context-aware recommendations
+        if result.health_label in ("Degraded", "Stressed") or result.noise_label == "High":
+            if st.button("🎯 Get Action Recommendations"):
                 st.markdown("### 🛟 Take Action")
-                if result.noise_label == "High":
-                    st.write("- Reduce boat traffic and engine noise in the area.\n- Establish quiet zones and enforce speed limits.\n- Schedule activities to avoid sensitive hours (e.g., spawning).")
+                
+                # Get acoustic map insights if possible
+                acoustic_insights = []
+                try:
+                    # Load UMAP data and get insights using cached functions
+                    base_df = load_umap_data_cached()
+                    if base_df is not None and not base_df.empty:
+                        # Get UMAP coordinates for this recording
+                        coord = transform_with_umap(feature_vals)
+                        if coord is not None:
+                            # Identify clusters using cached function
+                            cluster_labels, cluster_info = load_cluster_data_cached(base_df)
+                            
+                            # Analyze nearest neighbors
+                            neighbor_analysis = analyze_nearest_neighbors(base_df, coord, n_neighbors=5)
+                            
+                            # Generate insights
+                            acoustic_insights = generate_acoustic_insights(coord, cluster_labels, cluster_info, neighbor_analysis)
+                except Exception as e:
+                    st.warning(f"Could not generate acoustic insights: {e}")
+                
+                # Display acoustic map insights if available
+                if acoustic_insights:
+                    st.markdown("#### 💡 Insights from the Acoustic Map:")
+                    for insight in acoustic_insights:
+                        st.markdown(insight)
+                    st.markdown("---")
+                
+                # Context-aware recommendations based on prediction combinations
+                st.markdown("#### 🎯 Recommended Actions:")
+                
+                # Determine the primary concern and urgency
+                health_degraded = result.health_label in ("Degraded", "Stressed")
+                noise_high = result.noise_label == "High"
+                
+                if health_degraded and noise_high:
+                    # Most critical case: Both health and noise issues
+                    st.error("🚨 **CRITICAL SITUATION**: Both reef health and noise pollution detected")
+                    st.markdown("""
+                    **Immediate Actions (Priority 1):**
+                    - **Report vessel activity** to local authorities immediately
+                    - **Document noise sources** (boat registration, time, location)
+                    - **Establish emergency quiet zones** around the reef
+                    - **Contact marine patrol** for enforcement
+                    
+                    **Follow-up Actions (Priority 2):**
+                    - **Water quality testing** for pollution sources
+                    - **Habitat assessment** for physical damage
+                    - **Community engagement** to reduce local noise
+                    - **Long-term monitoring** plan implementation
+                    """)
+                    
+                elif health_degraded and not noise_high:
+                    # Health issue without noise - focus on environmental factors
+                    st.warning("⚠️ **ENVIRONMENTAL CONCERN**: Reef health issues detected (low noise)")
+                    st.markdown("""
+                    **Primary Actions:**
+                    - **Water quality testing** (nutrients, temperature, pH, turbidity)
+                    - **Bleaching assessment** and heat stress monitoring
+                    - **Pollution source investigation** (runoff, sewage, agricultural)
+                    - **Habitat restoration** planning and implementation
+                    
+                    **Monitoring Actions:**
+                    - **Regular acoustic monitoring** to track recovery
+                    - **Water quality baseline** establishment
+                    - **Community education** on reef protection
+                    - **Scientific collaboration** for detailed assessment
+                    """)
+                    
+                elif not health_degraded and noise_high:
+                    # Noise issue without health problems - preventive action
+                    st.info("🔊 **NOISE CONCERN**: High noise detected on healthy reef")
+                    st.markdown("""
+                    **Preventive Actions:**
+                    - **Monitor noise impact** on reef ecosystem
+                    - **Report excessive vessel traffic** to authorities
+                    - **Advocate for speed limits** and quiet zones
+                    - **Document noise patterns** and sources
+                    
+                    **Protection Actions:**
+                    - **Community awareness** about noise impacts
+                    - **Seasonal restrictions** during sensitive periods
+                    - **Alternative routing** for vessels
+                    - **Regular monitoring** to prevent health decline
+                    """)
+                    
                 else:
-                    st.write("- Investigate water quality (nutrients, turbidity).\n- Monitor for bleaching and heat stress.\n- Engage local conservation groups for habitat restoration.")
+                    # Healthy reef, low noise - maintenance and monitoring
+                    st.success("✅ **HEALTHY REEF**: Good health and low noise levels")
+                    st.markdown("""
+                    **Maintenance Actions:**
+                    - **Continue regular monitoring** to maintain health
+                    - **Document baseline conditions** for future comparison
+                    - **Community education** on reef conservation
+                    - **Support local conservation** efforts
+                    
+                    **Prevention Actions:**
+                    - **Monitor for early warning signs** of degradation
+                    - **Maintain water quality** standards
+                    - **Prevent pollution** and overfishing
+                    - **Support marine protected areas**
+                    """)
+                
+                # Additional recommendations based on acoustic insights
+                if acoustic_insights:
+                    st.markdown("#### 🔍 Additional Insights:")
+                    if any("High Noise Zone" in insight for insight in acoustic_insights):
+                        st.warning("🚨 **Acoustic Analysis**: Your recording is in a high-noise acoustic zone. Immediate noise reduction measures are needed.")
+                    elif any("Degraded Zone" in insight for insight in acoustic_insights):
+                        st.warning("⚠️ **Acoustic Analysis**: Your recording falls in a degraded acoustic zone. Focus on pollution reduction and habitat restoration.")
+                    elif any("trajectory" in insight.lower() for insight in acoustic_insights):
+                        st.info("📈 **Trend Analysis**: Consider monitoring this location over time to track acoustic changes.")
 
                 with st.form("send_report_form"):
                     reporter = st.text_input("Your name (optional)")
@@ -787,15 +1355,27 @@ def show_batch_predictions():
 
 
 def run_batch_upload(batch_files):
-    """Analyze multiple uploaded files and summarize results."""
-    st.markdown("### Batch Summary")
+    """Analyze multiple uploaded files and summarize results with UMAP visualization."""
+    st.markdown("### 📊 Batch Analysis Results")
+    
+    # Initialize data collection
     rows = []
     healthy_count = 0
     degraded_count = 0
     error_count = 0
+    user_embeddings = []
+    user_coordinates = []
+    user_labels = []
+    user_filenames = []
 
-    for f in batch_files:
+    # Process each file
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i, f in enumerate(batch_files):
         try:
+            status_text.text(f"Processing {f.name}... ({i+1}/{len(batch_files)})")
+            
             with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
                 tmp_file.write(f.getvalue())
                 tmp_path = tmp_file.name
@@ -818,13 +1398,22 @@ def run_batch_upload(batch_files):
             max_val = np.max(np.abs(audio_np)) or 1
             audio_np = (audio_np.astype(np.float32) / max_val).astype(np.float32)
 
-            # Resolve features
+            # Resolve features and get embeddings
             feature_vals, _ = resolve_features_for_file(f.name, audio_np, sr)
+            
+            # Store embeddings for UMAP
+            user_embeddings.append(feature_vals.flatten())
+            user_filenames.append(f.name)
+            
             # Predict
             result = predict_with_real_model(feature_vals)
             status = 'success'
             health = result.health_label
             conf = result.health_conf if result.health_conf is not None else 0.0
+            
+            # Store prediction results
+            user_labels.append(health)
+            
             if health == 'Healthy':
                 healthy_count += 1
             else:
@@ -851,34 +1440,268 @@ def run_batch_upload(batch_files):
                     os.unlink(tmp_path)
             except Exception:
                 pass
+        progress_bar.progress((i + 1) / len(batch_files))
 
+    # Clear progress indicators
+    progress_bar.empty()
+    status_text.empty()
+
+    # Display results table
     df = pd.DataFrame(rows)
+    st.markdown("### 📋 Analysis Results")
     st.dataframe(df, use_container_width=True)
+    
+    # Summary metrics
     total = len(rows)
     if total > 0:
         pct_healthy = healthy_count / total
         pct_degraded = degraded_count / total
-        st.markdown("#### Aggregates")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total", f"{total}")
-        c2.metric("Healthy", f"{pct_healthy:.0%}")
-        c3.metric("Degraded", f"{pct_degraded:.0%}")
+        st.markdown("### 📊 Summary Statistics")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Files", f"{total}")
+        c2.metric("Healthy", f"{healthy_count} ({pct_healthy:.0%})")
+        c3.metric("Degraded", f"{degraded_count} ({pct_degraded:.0%})")
+        c4.metric("Errors", f"{error_count}")
+
+    # Enhanced UMAP Visualization with Trajectory Analysis
+    if len(user_embeddings) > 0:
+        st.markdown("### 🗺️ Enhanced Acoustic Map - Your Recordings")
+        st.markdown("See how your recordings cluster in acoustic space with trajectory analysis:")
+        
+        try:
+            # Load base UMAP data for context
+            base_df = load_umap_coordinates()
+            if base_df is not None and not base_df.empty:
+                # Identify clusters in base data
+                cluster_labels, cluster_info = identify_acoustic_clusters(base_df, method='kmeans', n_clusters=3)
+                
+            # Transform user embeddings to UMAP coordinates
+            from src.inference import transform_with_umap
+            
+            # Get UMAP coordinates for user data
+            user_coords = []
+            for embedding in user_embeddings:
+                coord = transform_with_umap(embedding.reshape(1, -1))
+                if coord is not None:
+                    user_coords.append(coord[0])
+                else:
+                    user_coords.append([0, 0])  # Fallback
+            
+            # Create user data DataFrame
+            user_df = pd.DataFrame({
+                'x': [coord[0] for coord in user_coords],
+                'y': [coord[1] for coord in user_coords],
+                'filename': user_filenames,
+                'health_status': user_labels
+            })
+            
+            # Check if filenames contain date information for trajectory analysis
+            trajectory_data = []
+            has_temporal_data = False
+            
+            # Try to extract dates from filenames
+            import re
+            from datetime import datetime
+            
+            for i, filename in enumerate(user_filenames):
+                # Look for common date patterns in filenames
+                date_patterns = [
+                    r'(\d{8})',  # YYYYMMDD
+                    r'(\d{4}-\d{2}-\d{2})',  # YYYY-MM-DD
+                    r'(\d{2}/\d{2}/\d{4})',  # MM/DD/YYYY
+                    r'(\d{4}\d{2}\d{2})',  # YYYYMMDD
+                ]
+                
+                date_found = None
+                for pattern in date_patterns:
+                    match = re.search(pattern, filename)
+                    if match:
+                        try:
+                            date_str = match.group(1)
+                            if len(date_str) == 8:  # YYYYMMDD
+                                date_found = datetime.strptime(date_str, '%Y%m%d')
+                            elif '-' in date_str:  # YYYY-MM-DD
+                                date_found = datetime.strptime(date_str, '%Y-%m-%d')
+                            elif '/' in date_str:  # MM/DD/YYYY
+                                date_found = datetime.strptime(date_str, '%m/%d/%Y')
+                            break
+                        except ValueError:
+                            continue
+                
+                if date_found:
+                    has_temporal_data = True
+                    trajectory_data.append({
+                        'x': user_coords[i][0],
+                        'y': user_coords[i][1],
+                        'filename': filename,
+                        'date': date_found,
+                        'label': user_labels[i]
+                    })
+            
+            # Create trajectory plot if temporal data is available
+            if has_temporal_data and len(trajectory_data) > 1:
+                st.markdown("#### 📈 Acoustic Trajectory Analysis")
+                st.markdown("Your recordings show temporal progression. The red line shows the acoustic trajectory over time:")
+                
+                trajectory_fig = create_trajectory_plot(base_df, trajectory_data, cluster_labels, cluster_info)
+                st.plotly_chart(trajectory_fig, use_container_width=True)
+                
+                # Analyze trajectory trends
+                trajectory_df = pd.DataFrame(trajectory_data)
+                trajectory_df = trajectory_df.sort_values('date')
+                
+                # Calculate trajectory metrics
+                start_point = trajectory_df.iloc[0]
+                end_point = trajectory_df.iloc[-1]
+                distance_moved = np.sqrt((end_point['x'] - start_point['x'])**2 + (end_point['y'] - start_point['y'])**2)
+                
+                # Determine trend direction
+                x_trend = end_point['x'] - start_point['x']
+                y_trend = end_point['y'] - start_point['y']
+                
+                st.markdown("#### 📊 Trajectory Insights")
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                        st.metric("Distance Moved", f"{distance_moved:.2f}")
+                with col2:
+                        st.metric("Time Span", f"{(end_point['date'] - start_point['date']).days} days")
+                with col3:
+                        if distance_moved > 3:
+                            trend_text = "Significant Change"
+                            trend_color = "🔴"
+                        elif distance_moved > 1:
+                            trend_text = "Moderate Change"
+                            trend_color = "🟡"
+                        else:
+                            trend_text = "Stable"
+                            trend_color = "🟢"
+                        st.metric("Acoustic Stability", f"{trend_color} {trend_text}")
+                
+                # Health trend analysis
+                health_trend = trajectory_df['label'].tolist()
+                if len(set(health_trend)) > 1:
+                        st.warning("⚠️ **Health Status Changed**: Your recordings show different health classifications over time. This may indicate environmental changes or measurement variations.")
+                else:
+                        st.success("✅ **Consistent Health Status**: All recordings show the same health classification.")
+            
+                else:
+                # Regular scatter plot without trajectory
+                st.markdown("#### 🎯 Acoustic Distribution")
+                st.markdown("Your recordings plotted against the training data acoustic landscape:")
+                
+                # Create enhanced scatter plot with base data and user points
+                fig = create_enhanced_scatter_plot(base_df, cluster_labels, cluster_info)
+                
+                # Add user points
+                for i, row in user_df.iterrows():
+                    fig.add_trace(go.Scatter(
+                    x=[row['x']],
+                    y=[row['y']],
+                    mode='markers',
+                marker=dict(
+                                symbol="star",
+                                size=15,
+                                color="red" if row['health_status'] == 'Degraded' else "blue",
+                                line=dict(width=2, color="white")
+                    ),
+                    name=f"Your Recording: {row['filename']}",
+                    hovertemplate=f"<b>{row['filename']}</b><br>" +
+                                         f"Health: {row['health_status']}<br>" +
+                                         "Position: (%{x:.2f}, %{y:.2f})<br>" +
+                                         "<extra></extra>"
+                    ))
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Show clustering insights
+                st.markdown("#### 🔍 Acoustic Clustering Insights")
+                col1, col2 = st.columns(2)
+            
+                with col1:
+                st.markdown("**Clustering Analysis:**")
+                if len(user_df) > 1:
+                    # Calculate spread
+                    x_spread = user_df['x'].max() - user_df['x'].min()
+                    y_spread = user_df['y'].max() - user_df['y'].min()
+                    st.write(f"• **Acoustic spread**: {x_spread:.2f} × {y_spread:.2f}")
+                    
+                    # Check for tight clusters
+                    if x_spread < 2 and y_spread < 2:
+                        st.write("• **Tight cluster**: Your recordings have very similar acoustic signatures")
+                    elif x_spread < 5 and y_spread < 5:
+                        st.write("• **Moderate spread**: Your recordings show some acoustic diversity")
+                    else:
+                        st.write("• **Wide spread**: Your recordings show diverse acoustic patterns")
+                else:
+                    st.write("• Upload more files to see clustering patterns")
+            
+                with col2:
+                st.markdown("**Health Distribution:**")
+                health_counts = user_df['health_status'].value_counts()
+                for health, count in health_counts.items():
+                    percentage = (count / len(user_df)) * 100
+                    st.write(f"• **{health}**: {count} files ({percentage:.0f}%)")
+            
+            else:
+                # Fallback to simple visualization without base data
+                st.warning("Base UMAP data not available. Showing simplified visualization.")
+                
+                # Simple scatter plot
+                fig = px.scatter(
+                    user_df,
+                    x='x',
+                    y='y',
+                    color='health_status',
+                    hover_data=['filename'],
+                    title="Your Recordings in Acoustic Space"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+        except Exception as e:
+            st.warning(f"Could not generate enhanced acoustic map: {e}")
+            st.info("This feature requires the UMAP model to be available.")
 
     # Download results
     csv_bytes = df.to_csv(index=False).encode('utf-8')
-    st.download_button("Download batch results (CSV)", data=csv_bytes, file_name="batch_results.csv", mime="text/csv")
+    st.download_button("📥 Download batch results (CSV)", data=csv_bytes, file_name="batch_results.csv", mime="text/csv")
 
 
 def show_acoustic_map():
-    """Enhanced Acoustic Map visualization with modern styling and interactivity."""
-    st.markdown('<h2 class="sub-header">🗺️ Acoustic Map</h2>', unsafe_allow_html=True)
+    """Enhanced Acoustic Map visualization with diagnostic capabilities."""
+    st.markdown('<h2 class="sub-header">🗺️ Acoustic Map - Diagnostic Tool</h2>', unsafe_allow_html=True)
     
     # Introduction
     st.markdown("""
-    **Explore the acoustic landscape of coral reefs!** This interactive map shows how different reef recordings cluster 
-    in acoustic space, helping you understand the relationship between sound patterns and reef health.
+    **Transform your reef recordings into actionable insights!** This enhanced acoustic map uses advanced clustering 
+    and neighbor analysis to provide diagnostic information about reef health patterns and conservation priorities.
     """)
     
+    # Help section
+    with st.expander("ℹ️ How to use the Acoustic Map", expanded=False):
+        st.markdown("""
+        **What is an Acoustic Map?**
+        - Each point represents a reef recording positioned by its acoustic characteristics
+        - Similar-sounding reefs cluster together in acoustic space
+        - Colors show health status: 🟢 Healthy, 🔴 Degraded, 🟠 High Noise
+        
+        **Diagnostic Zones:**
+        - The map automatically identifies distinct acoustic zones
+        - Each zone has a dominant health pattern
+        - Your recording's position reveals its acoustic "neighborhood"
+        
+        **Neighbor Analysis:**
+        - Shows the 5 most similar recordings from our database
+        - Helps understand what your recording sounds like compared to known samples
+        - Provides context for conservation decisions
+        
+        **Trajectory Analysis (Batch Uploads):**
+        - If you upload multiple files with dates in filenames, see how acoustic patterns change over time
+        - Red lines show the progression of acoustic health
+        - Helps identify trends and environmental changes
+        """)
+    
+    # Load data
     try:
         base_df = load_umap_coordinates()
         if base_df is None or base_df.empty:
@@ -889,86 +1712,33 @@ def show_acoustic_map():
         st.error(f"❌ UMAP coordinates not available: {e}")
         return
 
-    import plotly.express as px
-    import plotly.graph_objects as go
-
-    # Enhanced Training Set Map
-    st.markdown("### 🌊 Acoustic Landscape")
-    st.markdown("Each point represents a reef recording. Colors show health status:")
+    # Identify acoustic clusters
+    with st.spinner("🔍 Analyzing acoustic patterns..."):
+        cluster_labels, cluster_info = identify_acoustic_clusters(base_df, method='kmeans', n_clusters=3)
     
-    # Create color mapping
-    color_map = {
-        'healthy': '#2E8B57',      # Sea Green
-        'degraded': '#DC143C',      # Crimson  
-        'anthrophony': '#FF8C00'    # Dark Orange
-    }
+    # Display cluster information
+    st.markdown("### 🌊 Acoustic Diagnostic Zones")
+    st.markdown("The map below shows automatically identified acoustic zones based on sound pattern similarity:")
     
-    # Enhanced scatter plot
-    fig = px.scatter(
-        base_df,
-        x='x',
-        y='y',
-        color='label',
-        color_discrete_map=color_map,
-        opacity=0.7,
-        hover_data=['filename'],
-        title="Reef Acoustic Landscape",
-        labels={
-            'x': 'UMAP Dimension 1',
-            'y': 'UMAP Dimension 2',
-            'label': 'Reef Health Status'
-        }
-    )
-    
-    # Enhanced styling
-    fig.update_layout(
-        title=dict(
-            text="🌊 Reef Acoustic Landscape",
-            font=dict(size=20, color='#2c3e50'),
-            x=0.5
-        ),
-        xaxis=dict(
-            title=dict(
-                text="Acoustic Dimension 1",
-                font=dict(size=14, color='#2c3e50')
-            ),
-            gridcolor='rgba(128,128,128,0.2)',
-            showgrid=True
-        ),
-        yaxis=dict(
-            title=dict(
-                text="Acoustic Dimension 2", 
-                font=dict(size=14, color='#2c3e50')
-            ),
-            gridcolor='rgba(128,128,128,0.2)',
-            showgrid=True
-        ),
-        plot_bgcolor='rgba(0,0,0,0)',
-        paper_bgcolor='rgba(0,0,0,0)',
-        legend=dict(
-            title=dict(
-                text="Reef Health Status",
-                font=dict(size=12, color='#2c3e50')
-            ),
-            bgcolor='rgba(255,255,255,0.8)',
-            bordercolor='rgba(0,0,0,0.2)',
-            borderwidth=1
-        )
-    )
-    
-    # Update marker styling
-    fig.update_traces(
-        marker=dict(
-            size=8,
-            line=dict(width=1, color='white'),
-            opacity=0.8
-        ),
-        selector=dict(mode='markers')
-    )
-    
+    # Create enhanced scatter plot
+    fig = create_enhanced_scatter_plot(base_df, cluster_labels, cluster_info)
     st.plotly_chart(fig, use_container_width=True)
     
-    # Statistics
+    # Display cluster statistics
+    st.markdown("#### 📊 Zone Analysis")
+    col1, col2, col3 = st.columns(3)
+    
+    for i, (cluster_id, info) in enumerate(cluster_info.items()):
+        if cluster_id != -1:  # Skip noise points
+            with [col1, col2, col3][i % 3]:
+                st.metric(
+                    f"Zone {cluster_id + 1}",
+                    f"{info['dominant_label'].title()} ({info['dominant_percentage']:.0f}%)",
+                    f"{info['size']} recordings"
+                )
+    
+    # Overall statistics
+    st.markdown("#### 📈 Overall Dataset Statistics")
     col1, col2, col3 = st.columns(3)
     with col1:
         healthy_count = len(base_df[base_df['label'] == 'healthy'])
@@ -981,8 +1751,9 @@ def show_acoustic_map():
         st.metric("🔊 Noisy Areas", anthro_count)
 
     # Interactive Upload Section
-    st.markdown("### 🎯 Place Your Recording on the Map")
-    st.markdown("Upload an audio file to see where it falls in the acoustic landscape:")
+    st.markdown("---")
+    st.markdown("### 🎯 Analyze Your Recording")
+    st.markdown("Upload an audio file to see where it falls in the acoustic landscape and get diagnostic insights:")
     
     uploaded = st.file_uploader(
         "Upload a reef recording", 
@@ -992,7 +1763,7 @@ def show_acoustic_map():
     )
     
     if uploaded is None:
-        st.info("👆 Upload a file above to see where it appears on the acoustic map")
+        st.info("👆 Upload a file above to see where it appears on the acoustic map and get diagnostic insights")
         return
 
     # Process uploaded file
@@ -1023,99 +1794,40 @@ def show_acoustic_map():
                 st.warning("⚠️ Could not transform point with UMAP model.")
                 return
 
-            # Enhanced overlay plot
+            # Create enhanced overlay plot with uploaded point
             st.markdown("### 🎯 Your Recording on the Map")
-            
-            # Create enhanced overlay
-            fig2 = px.scatter(
-                base_df,
-                x='x',
-                y='y',
-                color='label',
-                color_discrete_map=color_map,
-                opacity=0.6,
-                hover_data=['filename'],
-                title=f"Your Recording: {uploaded.name}",
-                labels={
-                    'x': 'UMAP Dimension 1',
-                    'y': 'UMAP Dimension 2',
-                    'label': 'Reef Health Status'
-                }
-            )
-            
-            # Add the uploaded point with enhanced styling
-            fig2.add_scatter(
-                x=[coord[0,0]], 
-                y=[coord[0,1]], 
-                mode="markers", 
-                marker=dict(
-                    symbol="star",
-                    size=20,
-                    color="red",
-                    line=dict(width=3, color="darkred")
-                ),
-                name="Your Recording",
-                hovertemplate="<b>Your Recording</b><br>" +
-                             "File: " + uploaded.name + "<br>" +
-                             "Position: (%{x:.2f}, %{y:.2f})<br>" +
-                             "<extra></extra>"
-            )
-            
-            # Enhanced styling for overlay
-            fig2.update_layout(
-                title=dict(
-                    text=f"🎯 Your Recording: {uploaded.name}",
-                    font=dict(size=18, color='#2c3e50'),
-                    x=0.5
-                ),
-                xaxis=dict(
-                    title=dict(
-                        text="Acoustic Dimension 1",
-                        font=dict(size=14, color='#2c3e50')
-                    ),
-                    gridcolor='rgba(128,128,128,0.2)',
-                    showgrid=True
-                ),
-                yaxis=dict(
-                    title=dict(
-                        text="Acoustic Dimension 2",
-                        font=dict(size=14, color='#2c3e50')
-                    ),
-                    gridcolor='rgba(128,128,128,0.2)',
-                    showgrid=True
-                ),
-                plot_bgcolor='rgba(0,0,0,0)',
-                paper_bgcolor='rgba(0,0,0,0)',
-                legend=dict(
-                    title=dict(
-                        text="Reef Health Status",
-                        font=dict(size=12, color='#2c3e50')
-                    ),
-                    bgcolor='rgba(255,255,255,0.8)',
-                    bordercolor='rgba(0,0,0,0.2)',
-                    borderwidth=1
-                )
-            )
-            
+            fig2 = create_enhanced_scatter_plot(base_df, cluster_labels, cluster_info, coord, uploaded.name)
             st.plotly_chart(fig2, use_container_width=True)
             
-            # Show position info
-            st.markdown("### 📍 Position Analysis")
+            # Enhanced nearest neighbor analysis
+            st.markdown("### 🔍 Detailed Neighbor Analysis")
+            neighbor_analysis = analyze_nearest_neighbors(base_df, coord, n_neighbors=5)
+            
+            # Display summary
+            st.info(f"**{neighbor_analysis['summary']}**")
+            
+            # Show detailed neighbor information
+            st.markdown("#### 📋 Nearest Neighbors Details")
+            neighbor_df = neighbor_analysis['neighbors'].copy()
+            neighbor_df['Distance'] = neighbor_analysis['distances']
+            neighbor_df = neighbor_df[['filename', 'label', 'Distance']]
+            neighbor_df.columns = ['Filename', 'Health Status', 'Similarity Distance']
+            st.dataframe(neighbor_df, use_container_width=True)
+            
+            # Generate acoustic insights
+            st.markdown("### 💡 Diagnostic Insights")
+            insights = generate_acoustic_insights(coord, cluster_labels, cluster_info, neighbor_analysis)
+            
+            for insight in insights:
+                st.markdown(insight)
+            
+            # Position information
+            st.markdown("#### 📍 Position Details")
             col1, col2 = st.columns(2)
             with col1:
                 st.metric("X Position", f"{coord[0,0]:.2f}")
             with col2:
                 st.metric("Y Position", f"{coord[0,1]:.2f}")
-            
-            # Find nearest neighbors
-            distances = np.sqrt(np.sum((base_df[['x', 'y']].values - coord[0])**2, axis=1))
-            nearest_idx = np.argmin(distances)
-            nearest_distance = distances[nearest_idx]
-            nearest_label = base_df.iloc[nearest_idx]['label']
-            nearest_filename = base_df.iloc[nearest_idx]['filename']
-            
-            st.markdown("### 🔍 Nearest Neighbor")
-            st.info(f"**Closest match:** {nearest_filename} ({nearest_label}) - Distance: {nearest_distance:.3f}")
             
         finally:
             if os.path.exists(tmp_path):

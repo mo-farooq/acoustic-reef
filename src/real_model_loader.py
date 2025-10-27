@@ -80,7 +80,8 @@ def force_load_real_model():
                 min_samples_leaf=1,
                 bootstrap=True,
                 oob_score=False,
-                n_jobs=1
+                n_jobs=1,
+                class_weight='balanced'
             )
             
             # Try to manually extract the trained components

@@ -119,7 +119,7 @@ def find_embedding_for_filename(emb_df: pd.DataFrame, filename: str) -> Optional
 def compute_embedding_from_audio(audio_np: np.ndarray, sample_rate: int) -> np.ndarray:
     sp = get_surfperch_model()
     processed = sp.preprocess_audio(audio_np, sample_rate)
-    emb = sp.generate_embeddings(processed, 22050)
+    emb = sp.generate_embeddings(processed, 32000)
     return emb.reshape(1, -1) if emb.ndim == 2 else emb
 
 

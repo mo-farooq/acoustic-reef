@@ -100,7 +100,7 @@ def build_embeddings(items: List[LabeledItem], model_path: Path) -> Tuple[np.nda
         try:
             audio, sr = load_wav_as_float(item.audio_path)
             processed = model.preprocess_audio(audio, sr)
-            emb = model.generate_embeddings(processed, 22050)
+            emb = model.generate_embeddings(processed, 32000)
             # emb is [1, D] typically
             embeddings_list.append(emb[0] if emb.ndim == 2 else np.reshape(emb, (-1,)))
             health_labels.append(item.health_label)

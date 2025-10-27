@@ -59,9 +59,9 @@ def main() -> None:
 
     ensure_directory(OUTPUT_DIR)
 
-    # Load audio, preserving original sample rate and channels
+    # Load audio, resampling to 32kHz for SurfPerch compatibility
     # mono=False preserves channels; returns shape (n_channels, n_samples)
-    audio, sr = librosa.load(str(INPUT_AUDIO), sr=None, mono=False)
+    audio, sr = librosa.load(str(INPUT_AUDIO), sr=32000, mono=False)
 
     # Standardize to shape (n_channels, n_samples)
     if audio.ndim == 1:

@@ -49,31 +49,37 @@ class ReefClassifier:
                 n_estimators=100,
                 random_state=42,
                 max_depth=10,
-                min_samples_split=5
+                min_samples_split=5,
+                class_weight='balanced'
             )
             self.anthro_classifier = RandomForestClassifier(
                 n_estimators=100,
                 random_state=42,
                 max_depth=10,
-                min_samples_split=5
+                min_samples_split=5,
+                class_weight='balanced'
             )
         elif self.model_type == 'logistic_regression':
             self.health_classifier = LogisticRegression(
                 random_state=42,
-                max_iter=1000
+                max_iter=1000,
+                class_weight='balanced'
             )
             self.anthro_classifier = LogisticRegression(
                 random_state=42,
-                max_iter=1000
+                max_iter=1000,
+                class_weight='balanced'
             )
         elif self.model_type == 'svm':
             self.health_classifier = SVC(
                 random_state=42,
-                probability=True
+                probability=True,
+                class_weight='balanced'
             )
             self.anthro_classifier = SVC(
                 random_state=42,
-                probability=True
+                probability=True,
+                class_weight='balanced'
             )
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
