@@ -17,6 +17,35 @@ import os
 import wave
 import contextlib
 import hashlib
+import requests
+import sys
+from datetime import datetime, timezone
+import io
+
+# Optional metadata libs for GPS/date extraction
+try:
+    import mutagen
+    from mutagen.wave import WAVE
+except Exception:
+    mutagen = None
+try:
+    import exifread
+except Exception:
+    exifread = None
+
+# Map rendering
+try:
+    import folium
+    from streamlit_folium import st_folium
+except Exception:
+    folium = None
+    st_folium = None
+
+# Simple PDF generation
+try:
+    from fpdf import FPDF
+except Exception:
+    FPDF = None
 
 from src.models.surfperch_integration import SurfPerchModel
 from src.utils.config import SURFPERCH_SETTINGS, EMBEDDINGS_CSV, MASTER_DATASET_CSV, RF_MODEL_PATH
@@ -202,6 +231,34 @@ def main():
         )
         
         st.markdown("---")
+        st.markdown("### 📍 Location (optional)")
+        # Manual coordinate inputs; will be pre-filled if metadata extraction succeeds
+        default_lat = st.session_state.get('geo_lat', None)
+        default_lon = st.session_state.get('geo_lon', None)
+        col_lat, col_lon = st.columns(2)
+        with col_lat:
+            manual_lat = st.number_input(
+                "Latitude",
+                min_value=-90.0,
+                max_value=90.0,
+                value=float(default_lat) if isinstance(default_lat, (int, float)) else 0.0,
+                step=0.0001,
+                format="%0.6f"
+            )
+        with col_lon:
+            manual_lon = st.number_input(
+                "Longitude",
+                min_value=-180.0,
+                max_value=180.0,
+                value=float(default_lon) if isinstance(default_lon, (int, float)) else 0.0,
+                step=0.0001,
+                format="%0.6f"
+            )
+        use_manual_coords = st.checkbox("Use manual coordinates", value=False,
+            help="Enable to override file metadata coordinates if present")
+        st.session_state['manual_lat'] = manual_lat
+        st.session_state['manual_lon'] = manual_lon
+        st.session_state['use_manual_coords'] = use_manual_coords
         st.markdown("### ℹ️ About")
         st.markdown("""
         **Acoustic Reef** analyzes underwater soundscapes to assess coral reef health.
@@ -213,7 +270,7 @@ def main():
         """)
     
     # Main content area with tabs
-    tabs = st.tabs(["🎤 Single Analysis", "📊 Batch Analysis", "🗺️ Acoustic Map & Diagnostics"])
+    tabs = st.tabs(["🎤 Single Analysis", "📊 Batch Analysis", "🗺️ Acoustic Map & Diagnostics", "🌍 Geo-Acoustic Map"])
     with tabs[0]:
         if uploaded_file is not None:
             analyze_audio(uploaded_file, sample_rate, duration_limit)
@@ -231,6 +288,8 @@ def main():
             st.error(f"Batch analysis failed: {e}")
     with tabs[2]:
         show_acoustic_map()
+    with tabs[3]:
+        show_geo_acoustic_map()
 
 def show_landing_page():
     """Display the landing page when no file is uploaded"""
@@ -309,6 +368,29 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                 n_frames = wf.getnframes()
                 duration_sec = n_frames / float(sr) if sr else 0.0
 
+            # Attempt GPS/date metadata extraction from file header
+            extracted_lat, extracted_lon, recording_dt = extract_gps_and_datetime(tmp_path)
+            if extracted_lat is not None and extracted_lon is not None:
+                st.session_state['geo_lat'] = extracted_lat
+                st.session_state['geo_lon'] = extracted_lon
+            if recording_dt is not None:
+                st.session_state['recording_datetime'] = recording_dt
+
+            # Decide which coordinates to use
+            chosen_lat = None
+            chosen_lon = None
+            if st.session_state.get('use_manual_coords'):
+                chosen_lat = float(st.session_state.get('manual_lat') or 0.0)
+                chosen_lon = float(st.session_state.get('manual_lon') or 0.0)
+            else:
+                if extracted_lat is not None and extracted_lon is not None:
+                    chosen_lat = extracted_lat
+                    chosen_lon = extracted_lon
+                else:
+                    # Fallback to manual fields even if checkbox off (user may have typed)
+                    chosen_lat = float(st.session_state.get('manual_lat') or 0.0)
+                    chosen_lon = float(st.session_state.get('manual_lon') or 0.0)
+
             # Display audio info
             col1, col2, col3, col4 = st.columns(4)
             with col1:
@@ -319,6 +401,10 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                 st.metric("Channels", "Mono" if n_channels == 1 else f"{n_channels} ch")
             with col4:
                 st.metric("RMS Level", "—")
+
+            # Small location display if available
+            if chosen_lat or chosen_lon:
+                st.caption(f"Location: {chosen_lat:.6f}, {chosen_lon:.6f}")
 
             # Enhanced data quality validation with specific feedback
             quality_issues = []
@@ -588,6 +674,31 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                     conf_level, conf_icon = get_confidence_level(result.noise_conf)
                     st.metric("Confidence", f"{result.noise_conf:.0%} ({conf_level})", 
                              help=f"{conf_icon} {conf_level} confidence - {'Very reliable' if conf_level == 'High' else 'Moderately reliable' if conf_level == 'Medium' else 'Low reliability, consider retaking recording'}")
+
+            # Environmental Context based on coordinates/date
+            st.markdown("### 🌿 Environmental Context")
+            context_alerts = []
+            try:
+                if chosen_lat or chosen_lon:
+                    context_alerts, context_details = query_environmental_context(
+                        chosen_lat if chosen_lat is not None else 0.0,
+                        chosen_lon if chosen_lon is not None else 0.0,
+                        st.session_state.get('recording_datetime')
+                    )
+                else:
+                    context_details = {}
+            except Exception as e:
+                context_details = {}
+                st.info(f"Context lookup unavailable: {e}")
+
+            if context_alerts:
+                for alert in context_alerts:
+                    if 'SST' in alert or 'temperature' in alert.lower():
+                        st.warning(f"{alert}")
+                    else:
+                        st.info(alert)
+            else:
+                st.caption("No significant environmental anomalies detected near the provided location.")
 
             # Annotated Spectrogram based on predictions
             st.markdown("### 🎵 Annotated Spectrogram Analysis")
@@ -968,10 +1079,20 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                 with st.form("send_report_form"):
                     reporter = st.text_input("Your name (optional)")
                     email = st.text_input("Contact email (optional)")
-                    notes = st.text_area("Notes / location details")
+                    loc_text = f"{chosen_lat:.6f}, {chosen_lon:.6f}" if (chosen_lat or chosen_lon) else "(not provided)"
+                    default_notes = f"Location: {loc_text}\n"
+                    if context_alerts:
+                        default_notes += "Context Alerts: " + "; ".join(context_alerts)
+                    notes = st.text_area("Notes / location details", value=default_notes)
                     submitted = st.form_submit_button("Send Report")
                     if submitted:
-                        st.success("Report submitted. Thank you for taking action!")
+                        try:
+                            pdf_path = generate_pdf_report(result, chosen_lat, chosen_lon, context_alerts, reporter, notes)
+                            st.success("Report generated. Thank you for taking action!")
+                            with open(pdf_path, 'rb') as f:
+                                st.download_button("📄 Download PDF Report", data=f.read(), file_name="reef_report.pdf", mime="application/pdf")
+                        except Exception as e:
+                            st.success("Report submitted. Thank you for taking action!")
         
     except Exception as e:
         st.error(f"Error processing audio: {str(e)}")
@@ -980,6 +1101,17 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
         # Clean up temporary file
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+    # Persist last analysis in session for map tab
+    try:
+        st.session_state['last_analysis'] = {
+            'health_label': result.health_label if 'result' in locals() and result else None,
+            'noise_label': result.noise_label if 'result' in locals() and result else None,
+            'lat': chosen_lat if 'chosen_lat' in locals() else None,
+            'lon': chosen_lon if 'chosen_lon' in locals() else None,
+        }
+    except Exception:
+        pass
 
 
 def show_batch_predictions():
@@ -1541,6 +1673,357 @@ def show_acoustic_map():
         finally:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
+
+
+def show_geo_acoustic_map():
+    """Render folium map with last analysis coordinates and status."""
+    st.markdown('<h2 class="sub-header">🌍 Geo-Acoustic Map</h2>', unsafe_allow_html=True)
+    # Lazy import to handle cases where dependencies were installed after app start
+    local_folium = folium
+    local_st_folium = st_folium
+    if local_folium is None or local_st_folium is None:
+        try:
+            import importlib
+            local_folium = importlib.import_module('folium')
+            _sf_mod = importlib.import_module('streamlit_folium')
+            local_st_folium = getattr(_sf_mod, 'st_folium')
+            # Update globals for future calls
+            globals()['folium'] = local_folium
+            globals()['st_folium'] = local_st_folium
+        except Exception as e:
+            st.info("Install mapping dependencies to enable this feature (folium, streamlit-folium).")
+            st.caption(f"Python: {sys.executable}")
+            st.caption(f"Import error: {e}")
+            return
+
+    last = st.session_state.get('last_analysis') or {}
+    lat = last.get('lat')
+    lon = last.get('lon')
+    health = last.get('health_label')
+    noise = last.get('noise_label')
+
+    if lat is None or lon is None or (lat == 0.0 and lon == 0.0):
+        st.info("Run a Single Analysis with coordinates to see the map marker.")
+        return
+
+    # Color by status
+    if health == 'Healthy' and (noise or '').lower() != 'high':
+        color = 'green'
+    elif (noise or '').lower() == 'high':
+        color = 'purple'
+    else:
+        color = 'red'
+
+    m = local_folium.Map(location=[lat, lon], zoom_start=6, tiles='OpenStreetMap')
+    popup = f"Health: {health or '—'}<br>Noise: {noise or '—'}<br>Coords: {lat:.6f}, {lon:.6f}"
+    local_folium.CircleMarker(
+        location=[lat, lon],
+        radius=10,
+        color=color,
+        fill=True,
+        fill_opacity=0.8,
+        popup=popup
+    ).add_to(m)
+
+    local_st_folium(m, width=None, height=500)
+
+
+def extract_gps_and_datetime(file_path: str):
+    """Attempt to extract GPS (lat, lon) and recording datetime from audio metadata.
+
+    Tries mutagen for RIFF/WAV INFO or ID3-like tags, then exifread for EXIF GPS.
+    Returns (lat, lon, datetime or None). On failure, returns (None, None, None).
+    """
+    lat = lon = None
+    rec_dt = None
+
+    # Try mutagen (handles WAV INFO, ID3 for some formats)
+    try:
+        if mutagen is not None:
+            audio = mutagen.File(file_path, easy=True)
+            if audio is not None and hasattr(audio, 'tags') and audio.tags:
+                # Scan all tag values for possible coordinates
+                for k, v in dict(audio.tags).items():
+                    try:
+                        val_list = v if isinstance(v, list) else [v]
+                        for item in val_list:
+                            text = str(item)
+                            parsed = _parse_lat_lon_from_string(text)
+                            if parsed and lat is None and lon is None:
+                                lat, lon = parsed
+                            if rec_dt is None:
+                                dt_cand = _parse_datetime_safe(text)
+                                if dt_cand:
+                                    rec_dt = dt_cand
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+
+    # Try exifread for GPS tags if still missing
+    if (lat is None or lon is None) and exifread is not None:
+        try:
+            with open(file_path, 'rb') as f:
+                tags = exifread.process_file(f, details=False)
+            gps_lat = tags.get('GPS GPSLatitude')
+            gps_lat_ref = tags.get('GPS GPSLatitudeRef')
+            gps_lon = tags.get('GPS GPSLongitude')
+            gps_lon_ref = tags.get('GPS GPSLongitudeRef')
+            if gps_lat and gps_lon and gps_lat.values and gps_lon.values:
+                lat = _convert_exif_gps_to_decimal(gps_lat.values, str(gps_lat_ref))
+                lon = _convert_exif_gps_to_decimal(gps_lon.values, str(gps_lon_ref))
+        except Exception:
+            pass
+
+    # Try WAV-specific RIFF chunk scan for iXML/axml/XMP/LIST/bext
+    if (lat is None or lon is None):
+        try:
+            lat2, lon2, dt2 = _extract_gps_from_wav_chunks(file_path)
+            if lat2 is not None and lon2 is not None:
+                lat, lon = lat2, lon2
+            if rec_dt is None and dt2 is not None:
+                rec_dt = dt2
+        except Exception:
+            pass
+
+    # Fallback: scan entire file text for coordinates patterns
+    if (lat is None or lon is None):
+        try:
+            with open(file_path, 'rb') as f:
+                blob = f.read()
+            text = blob.decode('utf-8', errors='ignore')
+            parsed = _search_lat_lon_in_text(text)
+            if parsed:
+                lat, lon = parsed
+            if rec_dt is None:
+                rec_dt = _parse_datetime_safe(text)
+        except Exception:
+            pass
+
+    return lat, lon, rec_dt
+
+
+def _parse_lat_lon_from_string(s: str):
+    """Parse strings like '12.34, -56.78' into (lat, lon)."""
+    try:
+        parts = s.strip().replace(";", ",").split(",")
+        if len(parts) >= 2:
+            return float(parts[0]), float(parts[1])
+    except Exception:
+        return None
+    return None
+
+
+def _search_lat_lon_in_text(text: str):
+    """Search arbitrary text for plausible latitude/longitude values.
+    Returns (lat, lon) or None.
+    """
+    import re
+    # Combined decimal pattern first
+    combined = re.search(r"([+-]?\d{1,2}\.\d{3,})\s*[,/; ]\s*([+-]?\d{1,3}\.\d{3,})", text)
+    if combined:
+        lat = float(combined.group(1))
+        lon = float(combined.group(2))
+        if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+            return lat, lon
+    # Labeled forms like 'lat: 12.3456', 'lon= -123.4567'
+    lat_m = re.search(r"(lat|latitude)\s*[:=]\s*([+-]?\d{1,2}\.\d+)", text, re.IGNORECASE)
+    lon_m = re.search(r"(lon|longitude|lng)\s*[:=]\s*([+-]?\d{1,3}\.\d+)", text, re.IGNORECASE)
+    if lat_m and lon_m:
+        lat = float(lat_m.group(2))
+        lon = float(lon_m.group(2))
+        if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+            return lat, lon
+    return None
+
+
+def _parse_datetime_safe(val: str):
+    try:
+        # Try common formats
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y%m%dT%H%M%S"):
+            try:
+                return datetime.strptime(str(val), fmt).replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+        # Fallback to fromisoformat
+        return datetime.fromisoformat(str(val))
+    except Exception:
+        return None
+
+
+def _convert_exif_gps_to_decimal(values, ref):
+    """Convert EXIF GPS components to decimal degrees."""
+    try:
+        def frac_to_float(x):
+            try:
+                return float(x.num) / float(x.den)
+            except Exception:
+                return float(x)
+        d = frac_to_float(values[0])
+        m = frac_to_float(values[1])
+        s = frac_to_float(values[2])
+        dec = d + m/60.0 + s/3600.0
+        if ref and ref.strip().upper() in ('S', 'W'):
+            dec = -dec
+        return dec
+    except Exception:
+        return None
+
+
+def _extract_gps_from_wav_chunks(file_path: str):
+    """Parse RIFF/WAV chunks (iXML, axml, XMP , LIST, bext) for embedded GPS and date.
+    Returns (lat, lon, datetime_or_None) when found; otherwise (None, None, None).
+    """
+    import struct
+    lat = lon = None
+    rec_dt = None
+
+    with open(file_path, 'rb') as f:
+        data = f.read()
+    if len(data) < 12 or data[0:4] != b'RIFF' or data[8:12] != b'WAVE':
+        return None, None, None
+
+    offset = 12
+    n = len(data)
+    while offset + 8 <= n:
+        chunk_id = data[offset:offset+4]
+        chunk_size = struct.unpack('<I', data[offset+4:offset+8])[0]
+        chunk_data_start = offset + 8
+        chunk_data_end = min(n, chunk_data_start + chunk_size)
+        payload = data[chunk_data_start:chunk_data_end]
+
+        if chunk_id in (b'iXML', b'axml', b'XMP ', b'bext', b'LIST'):
+            try:
+                text = payload.decode('utf-8', errors='ignore')
+                parsed = _search_lat_lon_in_text(text)
+                if parsed and (lat is None or lon is None):
+                    lat, lon = parsed
+                if rec_dt is None:
+                    rec_dt = _parse_datetime_safe(text)
+            except Exception:
+                pass
+
+        # Chunks are padded to even sizes
+        offset = chunk_data_end + (chunk_size % 2)
+
+        if lat is not None and lon is not None and rec_dt is not None:
+            break
+
+    return lat, lon, rec_dt
+
+@st.cache_data(show_spinner=False)
+def get_sst_anomaly(latitude: float, longitude: float, date_str: str) -> float | None:
+    """Fetch NOAA Coral Reef Watch (CRW) daily SST anomaly (°C) via ERDDAP for a point and date.
+
+    Data source: NOAA CoastWatch ERDDAP, dataset `noaacrwsstDaily` (CRW CoralTemp 5km, daily).
+    Variable: `analysed_sst_anomaly` (degree_C).
+
+    Notes:
+    - ERDDAP requires coordinates matching the dataset grid. We query nearest grid cell by specifying exact lat/lon.
+    - Longitudes are often 0..360; this function tries both -180..180 and 0..360 conventions.
+    - Date must be provided as YYYY-MM-DD; time is set to 00:00:00Z.
+    """
+    base_csv = "https://coastwatch.noaa.gov/erddap/griddap/noaacrwsstDaily.csv"
+
+    def build_url(lat_val: float, lon_val: float) -> str:
+        return (
+            f"{base_csv}?analysed_sst_anomaly[({date_str}T00:00:00Z):1:({date_str}T00:00:00Z)]"
+            f"[({lat_val}):1:({lat_val})][({lon_val}):1:({lon_val})]"
+        )
+
+    # Try with provided lon first
+    urls = [build_url(latitude, longitude)]
+    # Also try 0..360
+    lon360 = (longitude + 360.0) % 360.0
+    if abs(lon360 - longitude) > 1e-6:
+        urls.append(build_url(latitude, lon360))
+
+    last_error = None
+    for url in urls:
+        try:
+            resp = requests.get(url, timeout=12)
+            resp.raise_for_status()
+            # ERDDAP CSV returns header + data. Use io.StringIO for pandas.
+            df = pd.read_csv(io.StringIO(resp.text))
+            # Expect a column named like 'analysed_sst_anomaly (degree_C)'
+            col = next((c for c in df.columns if 'analysed_sst_anomaly' in c), None)
+            if col and not df.empty:
+                val = df.iloc[0][col]
+                try:
+                    return float(val)
+                except Exception:
+                    continue
+        except Exception as e:
+            last_error = str(e)
+            continue
+    # If all attempts fail
+    return None
+
+
+def query_environmental_context(lat: float, lon: float, recording_dt: datetime | None):
+    """Query environmental context near the recording location/time.
+
+    - NOAA CRW daily SST anomaly (via ERDDAP) to assess heat stress risk.
+    - AIS placeholder (public AIS often requires API keys).
+    """
+    alerts = []
+    details = {}
+
+    # Determine date string (UTC) for CRW
+    if recording_dt is None:
+        date_use = datetime.utcnow().date().isoformat()
+    else:
+        date_use = recording_dt.date().isoformat()
+
+    # 1) NOAA CRW SST anomaly (°C). Threshold for concern: >= +1.0°C
+    try:
+        sst_anom = get_sst_anomaly(lat, lon, date_use)
+        if sst_anom is not None:
+            details['sst_anomaly_c'] = sst_anom
+            if sst_anom >= 1.0:
+                alerts.append(f"🌡️ High SST Anomaly Detected: +{sst_anom:.1f}°C above average. Risk of coral bleaching.")
+        else:
+            details['sst_anomaly_unavailable'] = True
+    except Exception as e:
+        details['sst_anomaly_error'] = str(e)
+
+    # 2) AIS placeholder
+    details['ais_info'] = "AIS lookup requires API key (e.g., AISHub, MarineTraffic)."
+
+    return alerts, details
+
+
+def generate_pdf_report(result, lat: float | None, lon: float | None, alerts: list[str], reporter: str | None, notes: str | None) -> str:
+    """Generate a simple PDF report including coordinates.
+    Returns path to the generated PDF.
+    """
+    if FPDF is None:
+        raise RuntimeError("PDF library not installed")
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=16)
+    pdf.cell(0, 10, txt="Acoustic Reef Report", ln=True)
+    pdf.set_font("Arial", size=12)
+    pdf.ln(4)
+    pdf.cell(0, 8, txt=f"Health: {getattr(result, 'health_label', '—')} (conf: {getattr(result, 'health_conf', 0):.0%} if available)", ln=True)
+    pdf.cell(0, 8, txt=f"Noise: {getattr(result, 'noise_label', '—')} (conf: {getattr(result, 'noise_conf', 0):.0%} if available)", ln=True)
+    loc_line = f"Coordinates: {lat:.6f}, {lon:.6f}" if (lat is not None and lon is not None) else "Coordinates: (not provided)"
+    pdf.cell(0, 8, txt=loc_line, ln=True)
+    if reporter:
+        pdf.cell(0, 8, txt=f"Reporter: {reporter}", ln=True)
+    if notes:
+        pdf.multi_cell(0, 8, txt=f"Notes: {notes}")
+    if alerts:
+        pdf.ln(2)
+        pdf.cell(0, 8, txt="Context Alerts:", ln=True)
+        for a in alerts:
+            pdf.multi_cell(0, 8, txt=f"- {a}")
+
+    # Save to temp file
+    pdf_output = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+    pdf.output(pdf_output.name)
+    pdf_output.close()
+    return pdf_output.name
 
 if __name__ == "__main__":
     main()

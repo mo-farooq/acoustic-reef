@@ -25,6 +25,13 @@ tqdm>=4.65.0
 python-dotenv>=1.0.0
 requests>=2.31.0
 
+# Geo & Media Metadata
+mutagen>=1.47.0
+exifread>=3.0.0
+folium>=0.17.0
+streamlit-folium>=0.21.0
+fpdf2>=2.7.9
+
 # Development
 jupyter>=1.0.0
 ipykernel>=6.25.0
