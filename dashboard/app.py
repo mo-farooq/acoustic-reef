@@ -52,7 +52,7 @@ except Exception:
     FPDF = None
 
 from src.models.surfperch_integration import SurfPerchModel
-from src.utils.config import SURFPERCH_SETTINGS, EMBEDDINGS_CSV, MASTER_DATASET_CSV, RF_MODEL_PATH
+from src.utils.config import SURFPERCH_SETTINGS, EMBEDDINGS_CSV, MASTER_DATASET_CSV, RF_MODEL_PATH, CLASSIFIER_MODEL_DIR
 from src.inference import (
     resolve_features_for_file,
     predict_vital_signs,
@@ -256,7 +256,7 @@ def main():
             1. Upload hydrophone recording
             2. AI analyzes with Google SurfPerch  
             3. Get instant health assessment
-            """)
+        """)
     
     # Main content area with tabs
     tabs = st.tabs(["🎤 Single Analysis", "📊 Batch Analysis", "🗺️ Acoustic Map & Diagnostics", "🌍 Geo-Acoustic Map"])
@@ -1321,208 +1321,655 @@ def run_batch_upload(batch_files):
         c3.metric("Degraded", f"{degraded_count} ({pct_degraded:.0%})")
         c4.metric("Errors", f"{error_count}")
 
-    # Enhanced UMAP Visualization with Trajectory Analysis
+    # Enhanced 3D UMAP Visualization with Diagnostics
     if len(user_embeddings) > 0:
-        st.markdown("### 🗺️ Enhanced Acoustic Map - Your Recordings")
-        st.markdown("See how your recordings cluster in acoustic space with trajectory analysis:")
+        st.divider()
+        st.header("🗺️ 3D Acoustic Map & Diagnostics")
+        
+        # Introduction with clear explanation
+        st.success("""
+        **🎯 What is this?** This map shows how similar your recordings sound to each other. 
+        Recordings that sound alike appear close together, while different-sounding recordings are far apart.
+        """)
+        
+        # Quick guide
+        with st.expander("📖 Quick Guide - How to Read This Map", expanded=False):
+            st.markdown("""
+            ### Understanding the 3D Acoustic Map
+            
+            **🎨 Colors:**
+            - 🟢 **Green Points** = Healthy reef sounds (lots of marine life)
+            - 🔴 **Red Points** = Degraded reef sounds (less marine life)
+            
+            **📍 Position:**
+            - **Close together** = Recordings sound very similar
+            - **Far apart** = Recordings sound very different
+            - **Tight cluster** = Consistent reef conditions
+            - **Scattered points** = Varied reef conditions
+            
+            **🎮 Controls:**
+            - **Rotate**: Click and drag anywhere
+            - **Zoom**: Use mouse wheel or pinch
+            - **Pan**: Right-click and drag
+            - **Reset View**: Double-click
+            
+            **💡 What to Look For:**
+            - All green and close together? ✅ Great! Your reef is consistently healthy
+            - Mixed colors? ⚠️ Your reef may have some stressed areas
+            - All red? 🔴 Your reef needs attention
+            - Points spread far? 🌐 Very different conditions across recordings
+            """)
+        
+        st.markdown("---")
         
         try:
-            # Load base UMAP data for context
+            # Load 3D UMAP model
+            import joblib
+            
+            # Define 3D UMAP model path
+            UMAP_MODEL_3D_PATH = CLASSIFIER_MODEL_DIR / "umap_model_3d.joblib"
+            
+            if not UMAP_MODEL_3D_PATH.exists():
+                st.warning("3D UMAP model not found. Showing 2D visualization instead.")
+                # Fall back to 2D
             base_df = load_umap_coordinates()
             if base_df is not None and not base_df.empty:
-                # Identify clusters in base data
                 cluster_labels, cluster_info = identify_acoustic_clusters(base_df, method='kmeans', n_clusters=3)
+            else:
+                umap_model_3d = joblib.load(UMAP_MODEL_3D_PATH)
+                st.success("✅ Loaded 3D UMAP model successfully")
                 
-            # Transform user embeddings to UMAP coordinates
-            from src.inference import transform_with_umap
+            # Transform user embeddings to 3D UMAP coordinates
+            st.info("🔄 Transforming your recordings into 3D acoustic space...")
             
-            # Get UMAP coordinates for user data
-            user_coords = []
-            for embedding in user_embeddings:
-                coord = transform_with_umap(embedding.reshape(1, -1))
-                if coord is not None:
-                    user_coords.append(coord[0])
-                else:
-                    user_coords.append([0, 0])  # Fallback
+            user_embeddings_array = np.array(user_embeddings)
+            if UMAP_MODEL_3D_PATH.exists():
+                user_coords_3d = umap_model_3d.transform(user_embeddings_array)
+            else:
+                # Fallback to 2D
+                user_coords_3d = None
+                user_coords = []
+                for embedding in user_embeddings:
+                    from src.inference import transform_with_umap
+                    coord = transform_with_umap(embedding.reshape(1, -1))
+                    if coord is not None:
+                        user_coords.append(coord[0])
+                    else:
+                        user_coords.append([0, 0])
             
-            # Create user data DataFrame
-            user_df = pd.DataFrame({
-                'x': [coord[0] for coord in user_coords],
-                'y': [coord[1] for coord in user_coords],
+            # Create 3D visualization if available
+            if user_coords_3d is not None:
+                # Create user data DataFrame for 3D
+                user_df_3d = pd.DataFrame({
+                    'x': user_coords_3d[:, 0],
+                    'y': user_coords_3d[:, 1],
+                    'z': user_coords_3d[:, 2],
                 'filename': user_filenames,
-                'health_status': user_labels
-            })
-            
-            # Check if filenames contain date information for trajectory analysis
-            trajectory_data = []
-            has_temporal_data = False
-            
-            # Try to extract dates from filenames
-            import re
-            from datetime import datetime
-            
-            for i, filename in enumerate(user_filenames):
-                # Look for common date patterns in filenames
-                date_patterns = [
-                    r'(\d{8})',  # YYYYMMDD
-                    r'(\d{4}-\d{2}-\d{2})',  # YYYY-MM-DD
-                    r'(\d{2}/\d{2}/\d{4})',  # MM/DD/YYYY
-                    r'(\d{4}\d{2}\d{2})',  # YYYYMMDD
-                ]
+                    'health_status': user_labels,
+                    'confidence': [f"{rows[i]['confidence']}" if i < len(rows) else "N/A" for i in range(len(user_filenames))],
+                    'noise': [rows[i]['noise'] if i < len(rows) else "N/A" for i in range(len(user_filenames))]
+                })
                 
-                date_found = None
-                for pattern in date_patterns:
-                    match = re.search(pattern, filename)
-                    if match:
-                        try:
-                            date_str = match.group(1)
-                            if len(date_str) == 8:  # YYYYMMDD
-                                date_found = datetime.strptime(date_str, '%Y%m%d')
-                            elif '-' in date_str:  # YYYY-MM-DD
-                                date_found = datetime.strptime(date_str, '%Y-%m-%d')
-                            elif '/' in date_str:  # MM/DD/YYYY
-                                date_found = datetime.strptime(date_str, '%m/%d/%Y')
-                            break
-                        except ValueError:
-                            continue
+                # Create interactive 3D scatter plot
+                st.subheader("📊 3D Interactive Acoustic Space")
                 
-                if date_found:
-                    has_temporal_data = True
-                    trajectory_data.append({
-                        'x': user_coords[i][0],
-                        'y': user_coords[i][1],
-                        'filename': filename,
-                        'date': date_found,
-                        'label': user_labels[i]
-                    })
-            
-            # Create trajectory plot if temporal data is available
-            if has_temporal_data and len(trajectory_data) > 1:
-                st.markdown("#### 📈 Acoustic Trajectory Analysis")
-                st.markdown("Your recordings show temporal progression. The red line shows the acoustic trajectory over time:")
+                # Color map for health status
+                color_map = {
+                    'Healthy': '#10b981',  # Green
+                    'Degraded': '#ef4444',  # Red
+                    'Stressed': '#f59e0b'   # Orange
+                }
+                user_df_3d['color'] = user_df_3d['health_status'].map(color_map)
                 
-                trajectory_fig = create_trajectory_plot(base_df, trajectory_data, cluster_labels, cluster_info)
-                st.plotly_chart(trajectory_fig, use_container_width=True)
+                # Create 3D scatter plot
+                fig_3d = go.Figure()
                 
-                # Analyze trajectory trends
-                trajectory_df = pd.DataFrame(trajectory_data)
-                trajectory_df = trajectory_df.sort_values('date')
+                # Group by health status for legend
+                for health_status in user_df_3d['health_status'].unique():
+                    mask = user_df_3d['health_status'] == health_status
+                    df_filtered = user_df_3d[mask]
+                    
+                    fig_3d.add_trace(go.Scatter3d(
+                        x=df_filtered['x'],
+                        y=df_filtered['y'],
+                        z=df_filtered['z'],
+                        mode='markers+text',
+                        name=health_status,
+                        marker=dict(
+                            size=12,
+                            color=color_map.get(health_status, '#6B7280'),
+                            symbol='diamond',
+                            line=dict(width=2, color='white'),
+                            opacity=0.9
+                        ),
+                        text=df_filtered['filename'],
+                        hovertemplate='<b>%{text}</b><br>' +
+                                     'Health: ' + df_filtered['health_status'] + '<br>' +
+                                     'Confidence: ' + df_filtered['confidence'] + '<br>' +
+                                     'Noise: ' + df_filtered['noise'] + '<br>' +
+                                     'Position: (%{x:.2f}, %{y:.2f}, %{z:.2f})<br>' +
+                                     '<extra></extra>'
+                    ))
                 
-                # Calculate trajectory metrics
-                start_point = trajectory_df.iloc[0]
-                end_point = trajectory_df.iloc[-1]
-                distance_moved = np.sqrt((end_point['x'] - start_point['x'])**2 + (end_point['y'] - start_point['y'])**2)
+                # Update layout for better 3D visualization
+                fig_3d.update_layout(
+                    title=dict(
+                        text='🎵 Your Recordings in 3D Acoustic Space',
+                        font=dict(size=20, color='#1e293b'),
+                        x=0.5,
+                        xanchor='center'
+                    ),
+                    scene=dict(
+                        xaxis=dict(
+                            title='UMAP Dimension 1',
+                            backgroundcolor='rgb(240, 240, 240)',
+                            gridcolor='white',
+                            showbackground=True
+                        ),
+                        yaxis=dict(
+                            title='UMAP Dimension 2',
+                            backgroundcolor='rgb(240, 240, 240)',
+                            gridcolor='white',
+                            showbackground=True
+                        ),
+                        zaxis=dict(
+                            title='UMAP Dimension 3',
+                            backgroundcolor='rgb(240, 240, 240)',
+                            gridcolor='white',
+                            showbackground=True
+                        ),
+                        camera=dict(
+                            eye=dict(x=1.5, y=1.5, z=1.3)
+                        )
+                    ),
+                    height=700,
+                    showlegend=True,
+                    legend=dict(
+                        title='Health Status',
+                        yanchor='top',
+                        y=0.99,
+                        xanchor='left',
+                        x=0.01,
+                        bgcolor='rgba(255, 255, 255, 0.9)',
+                        bordercolor='#cbd5e1',
+                        borderwidth=1
+                    ),
+                    hovermode='closest'
+                )
                 
-                # Determine trend direction
-                x_trend = end_point['x'] - start_point['x']
-                y_trend = end_point['y'] - start_point['y']
+                st.plotly_chart(fig_3d, use_container_width=True)
                 
-                st.markdown("#### 📊 Trajectory Insights")
+                # Interactive guide directly under the map
+                col_guide1, col_guide2 = st.columns([1, 1])
+                with col_guide1:
+                    st.info("""
+                    **🎮 How to Explore:**
+                    - **Rotate**: Click and drag to spin the map
+                    - **Zoom In/Out**: Scroll with mouse wheel
+                    - **Move Around**: Right-click and drag
+                    - **Reset View**: Double-click anywhere
+                    """)
+                with col_guide2:
+                    st.info("""
+                    **🔍 What You're Seeing:**
+                    - Each diamond 💎 is one of your recordings
+                    - Hover over any point to see details
+                    - 3 dimensions = 3 different sound characteristics
+                    - Explore from different angles!
+                    """)
+                
+                # Diagnostic Features Section with Simple Language
+                st.divider()
+                st.subheader("🔬 Simple Analysis Results")
+                st.caption("Here's what we found in plain English:")
+                
+                # Clustering Analysis with Simple Explanations
+                st.markdown("### 📊 How Similar Are Your Recordings?")
                 col1, col2, col3 = st.columns(3)
                 
+                # Calculate 3D spread
+                x_spread = user_df_3d['x'].max() - user_df_3d['x'].min()
+                y_spread = user_df_3d['y'].max() - user_df_3d['y'].min()
+                z_spread = user_df_3d['z'].max() - user_df_3d['z'].min()
+                total_spread = np.sqrt(x_spread**2 + y_spread**2 + z_spread**2)
+                
                 with col1:
-                    st.metric("Distance Moved", f"{distance_moved:.2f}")
+                    # Simplified spread metric
+                    if total_spread < 3:
+                        spread_emoji = "🎯"
+                        spread_text = "Very Similar"
+                        spread_explanation = "All recordings sound alike - consistent conditions!"
+                        spread_color = "success"
+                    elif total_spread < 7:
+                        spread_emoji = "📊"
+                        spread_text = "Somewhat Similar"
+                        spread_explanation = "Some variation - conditions may change between recordings"
+                        spread_color = "info"
+                    else:
+                        spread_emoji = "🌐"
+                        spread_text = "Very Different"
+                        spread_explanation = "Big differences - recordings from different conditions/times"
+                        spread_color = "warning"
+                    
+                    st.metric("Similarity Score", f"{spread_emoji} {spread_text}")
+                    if spread_color == "success":
+                        st.success(spread_explanation)
+                    elif spread_color == "info":
+                        st.info(spread_explanation)
+                    else:
+                        st.warning(spread_explanation)
+                
                 with col2:
-                    st.metric("Time Span", f"{(end_point['date'] - start_point['date']).days} days")
+                    # Calculate cluster density with simple explanation
+                    n_points = len(user_df_3d)
+                    volume = x_spread * y_spread * z_spread if (x_spread > 0 and y_spread > 0 and z_spread > 0) else 1
+                    density = n_points / volume if volume > 0 else 0
+                    
+                    if density > 1.0:
+                        cluster_text = "Tightly Grouped"
+                        cluster_emoji = "📍"
+                        cluster_explanation = "Points are close together - similar sound patterns"
+                    else:
+                        cluster_text = "Spread Out"
+                        cluster_emoji = "🗺️"
+                        cluster_explanation = "Points are scattered - diverse sound patterns"
+                    
+                    st.metric("Grouping", f"{cluster_emoji} {cluster_text}")
+                    st.caption(cluster_explanation)
+                
                 with col3:
-                    if distance_moved > 3:
-                        trend_text = "Significant Change"
-                        trend_color = "🔴"
-                    elif distance_moved > 1:
-                        trend_text = "Moderate Change"
-                        trend_color = "🟡"
+                    # Health consistency with clear explanation
+                    health_counts = user_df_3d['health_status'].value_counts()
+                    dominant_health = health_counts.index[0]
+                    dominant_pct = (health_counts.iloc[0] / len(user_df_3d)) * 100
+                    
+                    if dominant_pct >= 80:
+                        consistency_emoji = "✅"
+                        consistency_text = "Very Consistent"
+                        consistency_color = "success"
+                    elif dominant_pct >= 60:
+                        consistency_emoji = "⚖️"
+                        consistency_text = "Mostly Consistent"
+                        consistency_color = "info"
                     else:
-                        trend_text = "Stable"
-                        trend_color = "🟢"
-                    st.metric("Acoustic Stability", f"{trend_color} {trend_text}")
+                        consistency_emoji = "⚠️"
+                        consistency_text = "Mixed Results"
+                        consistency_color = "warning"
+                    
+                    st.metric("Health Pattern", f"{consistency_emoji} {consistency_text}")
+                    if consistency_color == "success":
+                        st.success(f"{dominant_pct:.0f}% are {dominant_health}")
+                    elif consistency_color == "info":
+                        st.info(f"{dominant_pct:.0f}% are {dominant_health}")
+                    else:
+                        st.warning(f"Only {dominant_pct:.0f}% are {dominant_health}")
                 
-                # Health trend analysis
-                health_trend = trajectory_df['label'].tolist()
-                if len(set(health_trend)) > 1:
-                    st.warning("⚠️ **Health Status Changed**: Your recordings show different health classifications over time. This may indicate environmental changes or measurement variations.")
+                # Simplified Health Distribution with Visual Guide
+                st.markdown("---")
+                st.markdown("### 🏥 What Does This Mean for Your Reef?")
+                
+                col1, col2 = st.columns([2, 1])
+                
+                with col1:
+                    # Create bar chart with simple title
+                    health_dist = user_df_3d['health_status'].value_counts()
+                    fig_dist = go.Figure(data=[
+                        go.Bar(
+                            x=health_dist.index,
+                            y=health_dist.values,
+                            marker_color=['#10b981' if h == 'Healthy' else '#ef4444' for h in health_dist.index],
+                            text=[f"{v} files" for v in health_dist.values],
+                            textposition='auto',
+                            textfont=dict(size=14, color='white')
+                        )
+                    ])
+                    fig_dist.update_layout(
+                        title=dict(text='How Many Recordings Show Each Status?', font=dict(size=16)),
+                        xaxis_title='Status',
+                        yaxis_title='Number of Your Recordings',
+                        height=320,
+                        showlegend=False
+                    )
+                    st.plotly_chart(fig_dist, use_container_width=True)
+                
+                with col2:
+                    st.markdown("**Your Results:**")
+                    for health, count in health_dist.items():
+                        percentage = (count / len(user_df_3d)) * 100
+                        if health == 'Healthy':
+                            st.success(f"🟢 **{count}** {health}\n\n({percentage:.0f}% of total)")
+                        else:
+                            st.error(f"🔴 **{count}** {health}\n\n({percentage:.0f}% of total)")
+                    
+                    # Add simple interpretation
+                    st.caption("---")
+                    if health_dist.index[0] == 'Healthy' and (health_dist.iloc[0] / len(user_df_3d)) >= 0.7:
+                        st.success("**Good news!** Most recordings show a healthy reef.")
+                    elif health_dist.index[0] == 'Degraded' and (health_dist.iloc[0] / len(user_df_3d)) >= 0.7:
+                        st.error("**Attention needed!** Most recordings show reef stress.")
+                    else:
+                        st.info("**Mixed results.** Some areas healthy, some need attention.")
+                
+                # Simplified Insights in Plain Language
+                st.markdown("---")
+                st.markdown("### 💡 What We Learned")
+                st.caption("Here's what the AI found (in simple terms):")
+                
+                # Create cards for each insight
+                insight_cols = st.columns(2)
+                
+                # Insight 1: Similarity
+                with insight_cols[0]:
+                    if total_spread < 3:
+                        st.info("""
+                        **🎯 Very Consistent Sounds**
+                        
+                        All your recordings sound very similar to each other. This is good! 
+                        It means your reef conditions are stable and consistent.
+                        
+                        *Why this matters:* Consistent sounds = stable environment
+                        """)
+                    elif total_spread > 7:
+                        st.warning("""
+                        **🌐 Very Different Sounds**
+                        
+                        Your recordings sound quite different from each other. This could mean:
+                        - Different recording locations
+                        - Different times of day
+                        - Changing environmental conditions
+                        
+                        *Why this matters:* Big changes might need investigation
+                        """)
+                    else:
+                        st.info("""
+                        **📊 Some Variation**
+                        
+                        Your recordings have some differences but aren't too extreme. 
+                        This is normal for reefs across different times or areas.
+                        
+                        *Why this matters:* Natural variation is expected
+                        """)
+                
+                # Insight 2: Health patterns
+                with insight_cols[1]:
+                    if dominant_pct >= 90:
+                        if dominant_health == "Healthy":
+                            st.success(f"""
+                            **✅ Excellent News!**
+                            
+                            Over 90% of your recordings show a **{dominant_health}** reef!
+                            Your reef is in great condition.
+                            
+                            *What to do:* Keep monitoring to maintain this good health
+                            """)
+                        else:
+                            st.error(f"""
+                            **⚠️ Needs Attention!**
+                            
+                            Over 90% of your recordings show a **{dominant_health}** reef.
+                            Action is needed to help your reef recover.
+                            
+                            *What to do:* See recommendations below
+                            """)
+                    elif len(health_counts) > 1 and abs(health_counts.iloc[0] - health_counts.iloc[1]) < 3:
+                        st.info("""
+                        **⚖️ Mixed Conditions**
+                        
+                        Your reef shows both healthy and stressed areas. This suggests:
+                        - Transitional phase
+                        - Some areas better than others
+                        - Variable conditions
+                        
+                        *What to do:* Monitor closely to track changes
+                        """)
+                    else:
+                        st.info(f"""
+                        **📊 Mostly {dominant_health}**
+                        
+                        Most recordings show **{dominant_health}** status ({dominant_pct:.0f}%).
+                        
+                        *Status:* {'Continue good practices' if dominant_health == 'Healthy' else 'Consider conservation actions'}
+                        """)
+                
+                # Actionable Recommendations in Simple Steps
+                st.markdown("---")
+                st.markdown("### 🎯 What Should You Do Next?")
+                st.caption("Simple, actionable steps based on your results:")
+                
+                # Priority recommendation based on dominant health
+                if dominant_health == "Degraded" and dominant_pct > 50:
+                    st.error("""
+                    ### 🚨 HIGH PRIORITY: Your Reef Needs Help
+                    
+                    **Why:** Most of your recordings show a stressed reef
+                    
+                    **What to do NOW:**
+                    1. 📸 **Document** what you see (photos, notes)
+                    2. 📞 **Contact** local marine conservation groups
+                    3. 🧪 **Test water** quality (temperature, pH, clarity)
+                    4. 🚫 **Reduce** human activity in the area if possible
+                    5. 📅 **Monitor** weekly to track changes
+                    
+                    **Resources:** Contact your local environmental agency or reef conservation organization
+                    """)
+                elif dominant_health == "Healthy" and dominant_pct > 70:
+                    st.success("""
+                    ### ✅ GOOD NEWS: Keep Up the Great Work!
+                    
+                    **Why:** Your reef is showing healthy signs
+                    
+                    **What to do to MAINTAIN health:**
+                    1. 📊 **Keep monitoring** monthly to catch early problems
+                    2. 🌊 **Protect** the area from damage
+                    3. 👥 **Share** your success with the community
+                    4. 📚 **Educate** others about reef conservation
+                    5. 🎯 **Stay vigilant** for any changes
+                    
+                    **Goal:** Maintain this excellent condition!
+                    """)
                 else:
-                    st.success("✅ **Consistent Health Status**: All recordings show the same health classification.")
-            
+                    st.info("""
+                    ### ⚖️ MIXED RESULTS: Monitor and Investigate
+                    
+                    **Why:** Some areas healthy, some stressed
+                    
+                    **What to do:**
+                    1. 🔍 **Identify** which recordings are healthy vs stressed
+                    2. 📍 **Map** where each recording was taken
+                    3. 🕐 **Note** when each was recorded
+                    4. 🔬 **Look for patterns** (location, time, conditions)
+                    5. 📈 **Track** changes over time
+                    
+                    **Focus:** Find what's different between healthy and stressed areas
+                    """)
+                
+                # Additional recommendations
+                st.markdown("**📋 Additional Tips:**")
+                
+                tips = []
+                
+                if total_spread > 7:
+                    tips.append({
+                        "title": "🌐 Investigate Why Sounds Are So Different",
+                        "content": "Your recordings vary a lot. Check if they were taken at different times of day, locations, or weather conditions. Large differences might indicate environmental changes worth investigating."
+                    })
+                
+                if len(user_df_3d) < 10:
+                    tips.append({
+                        "title": "📊 Collect More Recordings",
+                        "content": f"You have {len(user_df_3d)} recordings. For better accuracy, try to collect at least 10-15 recordings from different times and areas of your reef."
+                    })
+                
+                if len(tips) > 0:
+                    for tip in tips:
+                        with st.expander(tip["title"]):
+                            st.write(tip["content"])
+                else:
+                    st.success("✅ Your recording coverage looks good!")
+                
+                # Educational FAQ Section
+                st.markdown("---")
+                with st.expander("❓ Common Questions About This Analysis", expanded=False):
+                    st.markdown("""
+                    ### Frequently Asked Questions
+                    
+                    **Q: What does "acoustic space" mean?**
+                    A: Think of it like a map where similar-sounding recordings are placed close together. 
+                    Instead of showing geographic location, it shows how recordings sound compared to each other.
+                    
+                    **Q: Why are there 3 dimensions?**
+                    A: Sound has many characteristics (frequency, loudness, patterns). The AI found the 3 most 
+                    important differences between recordings and used them as X, Y, and Z axes.
+                    
+                    **Q: How does the AI know if a reef is healthy?**
+                    A: Healthy reefs have lots of marine life making sounds (fish, shrimp, coral). The AI learned 
+                    what healthy reefs sound like from thousands of examples and compares your recording to those patterns.
+                    
+                    **Q: What if my points are far apart?**
+                    A: This means your recordings sound different from each other. Could be:
+                    - Different locations on the reef
+                    - Different times of day
+                    - Different weather/water conditions
+                    - Environmental changes happening
+                    
+                    **Q: How accurate is this?**
+                    A: The AI is trained on real reef recordings, but it's a tool to help you, not a replacement 
+                    for expert analysis. Use it to guide your monitoring and know when to call in experts.
+                    
+                    **Q: What should I do with these results?**
+                    A: Follow the recommendations above! Share with local conservation groups, use for reports, 
+                    track changes over time, and take action to protect your reef.
+                    """)
+                
             else:
-                # Regular scatter plot without trajectory
-                    st.markdown("#### 🎯 Acoustic Distribution")
-                    st.markdown("Your recordings plotted against the training data acoustic landscape:")
-                    
-                    # Create enhanced scatter plot with base data and user points
-                    fig = create_enhanced_scatter_plot(base_df, cluster_labels, cluster_info)
-                    
-                    # Add user points
-                    for i, row in user_df.iterrows():
-                        fig.add_trace(go.Scatter(
-                            x=[row['x']],
-                            y=[row['y']],
-                            mode='markers',
-                marker=dict(
-                                symbol="star",
-                                size=15,
-                                color="red" if row['health_status'] == 'Degraded' else "blue",
-                                line=dict(width=2, color="white")
-                            ),
-                            name=f"Your Recording: {row['filename']}",
-                            hovertemplate=f"<b>{row['filename']}</b><br>" +
-                                         f"Health: {row['health_status']}<br>" +
-                                         "Position: (%{x:.2f}, %{y:.2f})<br>" +
-                                         "<extra></extra>"
-                        ))
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Show clustering insights
-            st.markdown("#### 🔍 Acoustic Clustering Insights")
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("**Clustering Analysis:**")
-                if len(user_df) > 1:
-                    # Calculate spread
-                    x_spread = user_df['x'].max() - user_df['x'].min()
-                    y_spread = user_df['y'].max() - user_df['y'].min()
-                    st.write(f"• **Acoustic spread**: {x_spread:.2f} × {y_spread:.2f}")
-                    
-                    # Check for tight clusters
-                    if x_spread < 2 and y_spread < 2:
-                        st.write("• **Tight cluster**: Your recordings have very similar acoustic signatures")
-                    elif x_spread < 5 and y_spread < 5:
-                        st.write("• **Moderate spread**: Your recordings show some acoustic diversity")
-                    else:
-                        st.write("• **Wide spread**: Your recordings show diverse acoustic patterns")
-                else:
-                    st.write("• Upload more files to see clustering patterns")
-            
-            with col2:
-                st.markdown("**Health Distribution:**")
-                health_counts = user_df['health_status'].value_counts()
-                for health, count in health_counts.items():
-                    percentage = (count / len(user_df)) * 100
-                    st.write(f"• **{health}**: {count} files ({percentage:.0f}%)")
-            
-            # Fallback to simple visualization without base data
-            if base_df is None or base_df.empty:
-                st.warning("Base UMAP data not available. Showing simplified visualization.")
+                # Fallback to 2D if 3D model not available
+                st.warning("""
+                **⚠️ 3D Model Not Available**
                 
-                # Simple scatter plot
-                fig = px.scatter(
+                The 3D visualization model isn't found. Showing a simpler 2D version instead.
+                
+                *Note:* Contact your administrator to enable 3D visualization for the full experience.
+                """)
+                
+                user_df = pd.DataFrame({
+                    'x': [coord[0] for coord in user_coords],
+                    'y': [coord[1] for coord in user_coords],
+                    'filename': user_filenames,
+                    'health_status': user_labels
+                })
+                
+                # Simple but enhanced 2D scatter plot
+                fig_2d = px.scatter(
                     user_df,
                     x='x',
                     y='y',
                     color='health_status',
                     hover_data=['filename'],
-                    title="Your Recordings in Acoustic Space"
+                    title="🗺️ Your Recordings in 2D Acoustic Space",
+                    color_discrete_map={'Healthy': '#10b981', 'Degraded': '#ef4444'},
+                    labels={'x': 'Sound Characteristic 1', 'y': 'Sound Characteristic 2'}
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                fig_2d.update_layout(
+                    height=500,
+                    hovermode='closest'
+                )
+                fig_2d.update_traces(marker=dict(size=15, symbol='diamond'))
+                st.plotly_chart(fig_2d, use_container_width=True)
+                
+                # Simple analysis for 2D
+                st.info("""
+                **📊 Quick Analysis:**
+                - **Green points** = Healthy reefs
+                - **Red points** = Stressed reefs
+                - **Close together** = Similar sounds
+                - **Far apart** = Different sounds
+                """)
             
         except Exception as e:
-            st.warning(f"Could not generate enhanced acoustic map: {e}")
-            st.info("This feature requires the UMAP model to be available.")
+            st.error(f"Could not generate 3D acoustic map: {e}")
+            st.info("This feature requires the 3D UMAP model to be available. Please ensure the model is trained.")
+            import traceback
+            st.code(traceback.format_exc())
+
+    # Final Summary Section
+    st.divider()
+    st.header("📋 Overall Summary")
+    
+    # Create summary based on results
+    summary_col1, summary_col2 = st.columns([2, 1])
+    
+    with summary_col1:
+        # Overall assessment
+        if total > 0:
+            healthy_ratio = healthy_count / total
+            
+            if healthy_ratio >= 0.8:
+                st.success(f"""
+                ### 🌟 Excellent Overall Health
+                
+                **{healthy_count} out of {total} recordings** ({healthy_ratio:.0%}) show healthy reef conditions.
+                
+                **What this means:**
+                Your reef is in great shape! The marine ecosystem is thriving with diverse sounds 
+                indicating plenty of marine life activity.
+                
+                **Keep it up!** Continue your monitoring efforts and maintain protection measures.
+                """)
+            elif healthy_ratio >= 0.5:
+                st.info(f"""
+                ### ⚖️ Mixed Health Status
+                
+                **{healthy_count} out of {total} recordings** ({healthy_ratio:.0%}) show healthy conditions, 
+                while **{degraded_count}** show signs of stress.
+                
+                **What this means:**
+                Your reef is experiencing some challenges but still has healthy areas. This is a critical 
+                time to intervene and prevent further degradation.
+                
+                **Action needed:** Focus on protecting healthy areas while addressing stressed zones.
+                """)
+            else:
+                st.error(f"""
+                ### 🚨 Reef Health Concern
+                
+                **Only {healthy_count} out of {total} recordings** ({healthy_ratio:.0%}) show healthy conditions.
+                **{degraded_count} recordings** indicate reef stress.
+                
+                **What this means:**
+                Your reef is facing significant challenges. The low number of healthy recordings suggests 
+                widespread stress that requires immediate attention.
+                
+                **Priority action:** Contact local marine conservation authorities immediately.
+                """)
+    
+    with summary_col2:
+        # Key stats card
+        st.metric("Total Analyzed", f"{total} files")
+        st.metric("Healthy", f"{healthy_count}", delta=f"{(healthy_count/total)*100:.0f}%" if total > 0 else "0%")
+        st.metric("Degraded", f"{degraded_count}", delta=f"-{(degraded_count/total)*100:.0f}%" if total > 0 else "0%", delta_color="inverse")
+        if error_count > 0:
+            st.metric("Errors", f"{error_count}", delta="⚠️ Check files", delta_color="off")
+    
+    # Next steps reminder
+    st.info("""
+    **📥 Don't forget to download your results!**
+    
+    Use the button below to save your analysis as a CSV file. You can:
+    - Share with conservation teams
+    - Track changes over time
+    - Include in reports
+    - Compare with future recordings
+    """)
 
     # Download results
     csv_bytes = df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Download batch results (CSV)", data=csv_bytes, file_name="batch_results.csv", mime="text/csv")
+    st.download_button(
+        "📥 Download Complete Analysis Report (CSV)", 
+        data=csv_bytes, 
+        file_name=f"acoustic_reef_analysis_{len(batch_files)}_files.csv", 
+        mime="text/csv",
+        type="primary"
+    )
 
 
 def show_acoustic_map():

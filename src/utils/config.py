@@ -43,6 +43,7 @@ NOISE_CLASSIFIER_PATH = CLASSIFIER_MODEL_DIR / "noise_classifier.joblib"
 # UMAP artifacts
 UMAP_COORDS_CSV = PROCESSED_DATA_DIR / "umap_coordinates.csv"
 UMAP_MODEL_PATH = CLASSIFIER_MODEL_DIR / "umap_model.joblib"
+UMAP_MODEL_3D_PATH = CLASSIFIER_MODEL_DIR / "umap_model_3d.joblib"
 
 # Audio processing settings
 AUDIO_SETTINGS = {
