@@ -22,6 +22,9 @@ import sys
 from datetime import datetime, timezone
 import io
 
+# Add project root to Python path
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 # Optional metadata libs for GPS/date extraction
 try:
     import mutagen
@@ -128,33 +131,12 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better styling
+# Minimal CSS for essential styling only
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 3rem;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .sub-header {
-        font-size: 1.5rem;
-        color: #2c3e50;
-        margin-bottom: 1rem;
-    }
-    .metric-card {
-        background-color: #f8f9fa;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border-left: 4px solid #1f77b4;
-    }
-    .status-healthy {
-        color: #28a745;
-        font-weight: bold;
-    }
-    .status-degraded {
-        color: #dc3545;
-        font-weight: bold;
+    /* Minimal custom styling - rely on Streamlit's native components */
+    .stApp {
+        max-width: 1400px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -162,17 +144,18 @@ st.markdown("""
 def main():
     """Main application function"""
     
-    # Header
-    st.markdown('<h1 class="main-header">🌊 Acoustic Reef</h1>', unsafe_allow_html=True)
-    st.markdown('<p style="text-align: center; font-size: 1.2rem; color: #666;">AI-powered stethoscope for the ocean</p>', unsafe_allow_html=True)
+    # Header using native Streamlit
+    st.title("🌊 Acoustic Reef")
+    st.subheader("🎧 AI-powered stethoscope for the ocean 🐠")
+    st.divider()
     
-    # Sidebar
+    # Sidebar using native Streamlit
     with st.sidebar:
-        st.header("🎛️ Controls")
-        st.markdown("---")
+        st.header("🎛️ Control Panel")
+        st.divider()
         
-        # File upload with enhanced guidance
-        st.markdown("#### 🎤 Upload Your Recording")
+        # File upload section
+        st.subheader("🎤 Upload Your Recording")
         
         # Pre-upload guidance
         with st.expander("📋 Recording Guidelines", expanded=True):
@@ -259,15 +242,20 @@ def main():
         st.session_state['manual_lat'] = manual_lat
         st.session_state['manual_lon'] = manual_lon
         st.session_state['use_manual_coords'] = use_manual_coords
-        st.markdown("### ℹ️ About")
-        st.markdown("""
-        **Acoustic Reef** analyzes underwater soundscapes to assess coral reef health.
         
-        **How it works:**
-        1. Upload your hydrophone recording
-        2. AI analyzes the audio using Google SurfPerch
-        3. Get instant reef health assessment
-        """)
+        st.divider()
+        
+        # About section using native Streamlit
+        with st.container():
+            st.subheader("ℹ️ About This Tool")
+            st.info("""
+            **Acoustic Reef** uses AI to analyze underwater soundscapes and assess coral reef health.
+            
+            **🔬 How it works:**
+            1. Upload hydrophone recording
+            2. AI analyzes with Google SurfPerch  
+            3. Get instant health assessment
+            """)
     
     # Main content area with tabs
     tabs = st.tabs(["🎤 Single Analysis", "📊 Batch Analysis", "🗺️ Acoustic Map & Diagnostics", "🌍 Geo-Acoustic Map"])
@@ -297,11 +285,12 @@ def show_landing_page():
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        st.markdown('<h2 class="sub-header">Welcome to Acoustic Reef</h2>', unsafe_allow_html=True)
+        st.success("""
+        ### 👋 Welcome to Acoustic Reef
+        Your AI-powered tool for monitoring coral reef health through underwater sound analysis
+        """)
         
         st.markdown("""
-        **Acoustic Reef** is your AI-powered tool for monitoring coral reef health through underwater sound analysis.
-        
         ### 🎯 What We Analyze
         - **Reef Health Status**: Healthy vs. Degraded
         - **Anthrophony Detection**: Human-made noise presence
@@ -637,14 +626,14 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                     st.error(f"Technical details: {str(e_mock)}")
                     return
 
-            # Vital Signs UI with enhanced presentation
-            st.markdown("### 🩺 Vital Signs")
+            # Vital Signs UI with native Streamlit
+            st.header("🩺 Reef Vital Signs")
             
-            # Model source indicator
+            # Model source indicator using native Streamlit
             if model_warning:
-                st.info(f"**Analysis Method**: {model_source}")
+                st.info(f"**📊 Analysis Method:** {model_source}")
             else:
-                st.success(f"**Analysis Method**: {model_source}")
+                st.success(f"**✅ Analysis Method:** {model_source}")
             
             # Helper function for confidence interpretation
             def get_confidence_level(conf):
@@ -657,26 +646,52 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                 else:
                     return "Low", "🔴"
             
-            col1, col2 = st.columns(2)
+            col1, col2 = st.columns(2, gap="large")
+            
             with col1:
-                color = "status-healthy" if result.health_label == "Healthy" else "status-degraded"
-                st.markdown("#### 🏥 Reef Health")
-                st.markdown(f'<p class="{color}">{result.health_label}</p>', unsafe_allow_html=True)
-                if result.health_conf is not None:
-                    conf_level, conf_icon = get_confidence_level(result.health_conf)
-                    st.metric("Confidence", f"{result.health_conf:.0%} ({conf_level})", 
-                             help=f"{conf_icon} {conf_level} confidence - {'Very reliable' if conf_level == 'High' else 'Moderately reliable' if conf_level == 'Medium' else 'Low reliability, consider retaking recording'}")
+                # Health status using native containers
+                health_icon = "🌿" if result.health_label == "Healthy" else "⚠️"
+                
+                with st.container():
+                    if result.health_label == "Healthy":
+                        st.success("**🏥 Reef Health Status**")
+                    else:
+                        st.error("**🏥 Reef Health Status**")
+                    
+                    st.markdown(f"# {health_icon} {result.health_label}")
+                    
+                    if result.health_conf is not None:
+                        conf_level, conf_icon = get_confidence_level(result.health_conf)
+                        st.metric(
+                            "Confidence Level", 
+                            f"{result.health_conf:.0%}",
+                            delta=f"{conf_level}",
+                            help=f"{conf_icon} {conf_level} confidence"
+                        )
+            
             with col2:
-                st.markdown("#### 🔊 Noise Pollution")
-                color_n = "status-degraded" if result.noise_label == "High" else "status-healthy"
-                st.markdown(f'<p class="{color_n}">{result.noise_label}</p>', unsafe_allow_html=True)
-                if result.noise_conf is not None:
-                    conf_level, conf_icon = get_confidence_level(result.noise_conf)
-                    st.metric("Confidence", f"{result.noise_conf:.0%} ({conf_level})", 
-                             help=f"{conf_icon} {conf_level} confidence - {'Very reliable' if conf_level == 'High' else 'Moderately reliable' if conf_level == 'Medium' else 'Low reliability, consider retaking recording'}")
+                # Noise pollution using native containers
+                noise_icon = "🔊" if result.noise_label == "High" else "🔇"
+                
+                with st.container():
+                    if result.noise_label == "High":
+                        st.error("**🔊 Noise Pollution Level**")
+                    else:
+                        st.success("**🔊 Noise Pollution Level**")
+                    
+                    st.markdown(f"# {noise_icon} {result.noise_label}")
+                    
+                    if result.noise_conf is not None:
+                        conf_level, conf_icon = get_confidence_level(result.noise_conf)
+                        st.metric(
+                            "Confidence Level",
+                            f"{result.noise_conf:.0%}",
+                            delta=f"{conf_level}",
+                            help=f"{conf_icon} {conf_level} confidence"
+                        )
 
             # Environmental Context based on coordinates/date
-            st.markdown("### 🌿 Environmental Context")
+            st.header("🌿 Environmental Context")
             context_alerts = []
             try:
                 if chosen_lat or chosen_lon:
@@ -701,7 +716,7 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                 st.caption("No significant environmental anomalies detected near the provided location.")
 
             # Annotated Spectrogram based on predictions
-            st.markdown("### 🎵 Annotated Spectrogram Analysis")
+            st.header("🎵 AI-Annotated Spectrogram")
             try:
                 # Use cached spectrogram computation
                 import plotly.graph_objects as go
@@ -845,7 +860,7 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                     probs = model.predict_proba(feature_vals)[0]
                     cls_to_prob = {str(c): float(p) for c, p in zip(model.classes_, probs)}
                     
-                    st.markdown("### 📊 AI Analysis Details")
+                    st.header("📊 AI Analysis Details")
                     
                     # Simplified single chart focusing on key information
                     class_names = list(cls_to_prob.keys())
@@ -961,8 +976,9 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
 
         # Enhanced Take Action section with context-aware recommendations
         if result.health_label in ("Degraded", "Stressed") or result.noise_label == "High":
-            if st.button("🎯 Get Action Recommendations"):
-                st.markdown("### 🛟 Take Action")
+            st.divider()
+            if st.button("🎯 Get Personalized Action Recommendations", type="primary"):
+                st.header("🛟 Take Action - Conservation Plan")
                 
                 # Get acoustic map insights if possible
                 acoustic_insights = []
@@ -1116,7 +1132,7 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
 
 def show_batch_predictions():
     """Load embeddings/dataset, align, run RF predictions, and display with filters/export."""
-    st.markdown('<h2 class="sub-header">📦 Batch Predictions</h2>', unsafe_allow_html=True)
+    st.header("📦 Batch Predictions")
 
     # Paths
     st.caption(f"Embeddings: {EMBEDDINGS_CSV}")
@@ -1197,7 +1213,7 @@ def show_batch_predictions():
 
 def run_batch_upload(batch_files):
     """Analyze multiple uploaded files and summarize results with UMAP visualization."""
-    st.markdown("### 📊 Batch Analysis Results")
+    st.header("📊 Batch Analysis Results")
     
     # Initialize data collection
     rows = []
@@ -1510,7 +1526,7 @@ def run_batch_upload(batch_files):
 
 def show_acoustic_map():
     """Enhanced Acoustic Map visualization with diagnostic capabilities."""
-    st.markdown('<h2 class="sub-header">🗺️ Acoustic Map - Diagnostic Tool</h2>', unsafe_allow_html=True)
+    st.header("🗺️ Acoustic Map - Diagnostic Tool")
     
     # Introduction
     st.markdown("""
@@ -1677,7 +1693,7 @@ def show_acoustic_map():
 
 def show_geo_acoustic_map():
     """Render folium map with last analysis coordinates and status."""
-    st.markdown('<h2 class="sub-header">🌍 Geo-Acoustic Map</h2>', unsafe_allow_html=True)
+    st.header("🌍 Geo-Acoustic Map")
     # Lazy import to handle cases where dependencies were installed after app start
     local_folium = folium
     local_st_folium = st_folium
