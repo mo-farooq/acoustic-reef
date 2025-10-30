@@ -145,6 +145,22 @@ st.markdown("""
 def main():
     """Main application function"""
     
+    # Load persisted analysis history (once)
+    try:
+        if 'analysis_history_loaded' not in st.session_state:
+            from pathlib import Path
+            import json
+            hist_path = Path('logs') / 'analysis_history.json'
+            if hist_path.exists():
+                try:
+                    with open(hist_path, 'r', encoding='utf-8') as f:
+                        st.session_state['analysis_history'] = json.load(f)
+                except Exception:
+                    st.session_state['analysis_history'] = []
+            st.session_state['analysis_history_loaded'] = True
+    except Exception:
+        pass
+
     # Header using native Streamlit
     st.title("🌊 Acoustic Reef")
     st.subheader("🎧 AI-powered stethoscope for the ocean 🐠")
@@ -1127,6 +1143,20 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
             'lat': chosen_lat if 'chosen_lat' in locals() else None,
             'lon': chosen_lon if 'chosen_lon' in locals() else None,
         }
+        # Append to analysis history for Geo map clustering
+        if st.session_state['last_analysis'].get('lat') and st.session_state['last_analysis'].get('lon'):
+            history = st.session_state.get('analysis_history') or []
+            history.append(st.session_state['last_analysis'])
+            st.session_state['analysis_history'] = history
+            # Persist to disk
+            try:
+                from pathlib import Path
+                import json
+                Path('logs').mkdir(parents=True, exist_ok=True)
+                with open(Path('logs') / 'analysis_history.json', 'w', encoding='utf-8') as f:
+                    json.dump(history, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -1137,14 +1167,41 @@ def show_batch_predictions():
 
     # Paths
     st.caption(f"Embeddings: {EMBEDDINGS_CSV}")
-    st.caption(f"Dataset: {MASTER_DATASET_CSV}")
+    st.caption(f"Dataset (configured): {MASTER_DATASET_CSV}")
     st.caption(f"Model: {RF_MODEL_PATH}")
+
+    # Resolve dataset path with robust fallbacks and manual upload option
+    resolved_dataset_path = None
+    uploaded_dataset = None
+    try:
+        from pathlib import Path
+        from src.utils import config as _cfg
+        primary = Path(MASTER_DATASET_CSV)
+        if primary.exists():
+            resolved_dataset_path = primary
+        else:
+            raw_fallback = Path(_cfg.RAW_DATA_DIR) / "dataset.csv"
+            if raw_fallback.exists():
+                st.info(f"Using raw dataset fallback: {raw_fallback}")
+                resolved_dataset_path = raw_fallback
+            else:
+                st.warning("Dataset CSV not found. Upload a dataset file to proceed.")
+                uploaded_dataset = st.file_uploader("Upload dataset.csv", type=["csv"], key="batch_dataset_csv")
+                if not uploaded_dataset:
+                    st.stop()
+
+    except Exception:
+        pass
 
     try:
         from src.models.reef_classifier import load_embeddings_from_csv, load_master_dataset, align_embeddings_and_labels, load_trained_rf_model, predict_with_model
         with st.spinner("Loading data and model..."):
             X_emb, emb_df = load_embeddings_from_csv()
-            dataset_df = load_master_dataset()
+            if resolved_dataset_path is not None:
+                dataset_df = load_master_dataset(resolved_dataset_path)
+            else:
+                import pandas as pd
+                dataset_df = pd.read_csv(uploaded_dataset)
             X, y, merged = align_embeddings_and_labels(emb_df, dataset_df)
             model = load_trained_rf_model()
             preds, probs = predict_with_model(model, X)
@@ -1203,8 +1260,20 @@ def show_batch_predictions():
             except Exception as e:
                 st.info(f"Could not compute metrics: {e}")
 
-        # Small summary
+        # Small summary and export
         st.caption(f"Total records: {len(results_df)} | After filters: {len(filtered)} | Feature dim: {X.shape[1] if 'X' in locals() else '—'}")
+        try:
+            import io
+            csv_buf = io.StringIO()
+            filtered.to_csv(csv_buf, index=False)
+            st.download_button(
+                label="⬇️ Export filtered results (CSV)",
+                data=csv_buf.getvalue(),
+                file_name="batch_predictions_filtered.csv",
+                mime="text/csv"
+            )
+        except Exception:
+            pass
 
     except FileNotFoundError as e:
         st.error(f"File not found: {e}")
@@ -2162,13 +2231,36 @@ def show_acoustic_map():
 def show_geo_acoustic_map():
     """Render folium map with last analysis coordinates and status."""
     st.header("🌍 Geo-Acoustic Map")
+    # Clear history control
+    clear = st.button("🗑️ Clear Map History", help="Remove all previous markers (does not affect results)")
+    if clear:
+        st.session_state['analysis_history'] = []
+        try:
+            from pathlib import Path
+            hist_path = Path('logs') / 'analysis_history.json'
+            if hist_path.exists():
+                hist_path.unlink()
+            st.success("Analysis history cleared!")
+        except Exception:
+            st.info("Could not remove stored file but in-memory history was cleared.")
+        return
+
     # Map controls
     col_map1, col_map2, col_map3 = st.columns([1, 1, 1])
     with col_map1:
+        # Auto select default basemap based on Streamlit theme
+        theme_is_dark = False
+        try:
+            theme_base = st.get_option('theme.base')
+            if theme_base and theme_base.lower().startswith('d'):
+                theme_is_dark = True
+        except Exception:
+            pass
+        default_idx = 0 if theme_is_dark else 1  # 0: Carto Dark, 1: Carto Light
         basemap = st.selectbox(
             "Basemap style",
             ["Carto Dark", "Carto Light", "OpenStreetMap", "Stamen Terrain"],
-            index=0,
+            index=default_idx,
             help="Choose a background map for better contrast"
         )
     with col_map2:

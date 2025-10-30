@@ -182,42 +182,38 @@ def create_enhanced_scatter_plot(df: pd.DataFrame, cluster_labels: np.ndarray,
                          "<extra></extra>"
         ))
     
-    # Update layout
+    # Update layout - dark theme for consistency
     fig.update_layout(
+        template='plotly_dark',
+        paper_bgcolor='#000000',
+        plot_bgcolor='rgba(0,0,0,0)',
         title=dict(
             text="🌊 Enhanced Acoustic Landscape with Diagnostic Zones",
-            font=dict(size=20, color='#2c3e50'),
+            font=dict(size=20, color='#e5e7eb'),
             x=0.5
         ),
         xaxis=dict(
-            title=dict(
-                text="Acoustic Dimension 1",
-                font=dict(size=14, color='#2c3e50')
-            ),
-            gridcolor='rgba(128,128,128,0.2)',
-            showgrid=True
+            title=dict(text="Acoustic Dimension 1", font=dict(size=14, color='#e5e7eb')),
+            gridcolor='#333333',
+            showgrid=True,
+            tickfont=dict(color='#9ca3af')
         ),
         yaxis=dict(
-            title=dict(
-                text="Acoustic Dimension 2",
-                font=dict(size=14, color='#2c3e50')
-            ),
-            gridcolor='rgba(128,128,128,0.2)',
-            showgrid=True
+            title=dict(text="Acoustic Dimension 2", font=dict(size=14, color='#e5e7eb')),
+            gridcolor='#333333',
+            showgrid=True,
+            tickfont=dict(color='#9ca3af')
         ),
-        plot_bgcolor='rgba(0,0,0,0)',
-        paper_bgcolor='rgba(0,0,0,0)',
         legend=dict(
-            title=dict(
-                text="Acoustic Zones",
-                font=dict(size=12, color='#2c3e50')
-            ),
-            bgcolor='rgba(255,255,255,0.8)',
-            bordercolor='rgba(0,0,0,0.2)',
-            borderwidth=1
+            title=dict(text="Acoustic Zones", font=dict(size=12, color='#e5e7eb')),
+            bgcolor='rgba(0,0,0,0)',
+            bordercolor='#374151',
+            borderwidth=1,
+            font=dict(color='#e5e7eb')
         ),
         width=800,
-        height=600
+        height=600,
+        hoverlabel=dict(bgcolor='rgba(17,17,17,0.95)', bordercolor='#374151', font_color='#e5e7eb')
     )
     
     return fig
