@@ -1363,30 +1363,31 @@ def run_batch_upload(batch_files):
         st.markdown("---")
         
         try:
-            # Load 3D UMAP model
+            # Load 3D UMAP model if available
             import joblib
-            
-            # Define 3D UMAP model path
             UMAP_MODEL_3D_PATH = CLASSIFIER_MODEL_DIR / "umap_model_3d.joblib"
-            umap_model_3d = None  # Always define
+            umap_model_3d = None
             if UMAP_MODEL_3D_PATH.exists():
-                umap_model_3d = joblib.load(UMAP_MODEL_3D_PATH)
-                st.success("✅ Loaded 3D UMAP model successfully")
+                try:
+                    umap_model_3d = joblib.load(UMAP_MODEL_3D_PATH)
+                    st.success("✅ Loaded 3D UMAP model successfully")
+                except Exception as e:
+                    st.warning(f"3D UMAP model could not be loaded: {e}. Falling back to 2D.")
             else:
                 st.warning("3D UMAP model not found. Showing 2D visualization instead.")
-                # Optionally: return or skip 3D transform logic entirely
 
+            # Load base UMAP coordinates and clusters (independent of 3D model)
             base_df = load_umap_coordinates()
             if base_df is not None and not base_df.empty:
                 cluster_labels, cluster_info = identify_acoustic_clusters(base_df, method='kmeans', n_clusters=3)
-
-            # Transform user embeddings to 3D UMAP coordinates
+                
+            # Transform user embeddings to 3D UMAP coordinates when possible
             st.info("🔄 Transforming your recordings into 3D acoustic space...")
             user_embeddings_array = np.array(user_embeddings)
-            user_coords_3d = None
             if umap_model_3d is not None:
                 user_coords_3d = umap_model_3d.transform(user_embeddings_array)
-            # else keep as None and skip 3D plotting logic
+            else:
+                user_coords_3d = None  # Fallback path triggers 2D-only visuals
             from src.inference import transform_with_umap
             user_coords = []
             for embedding in user_embeddings:
@@ -1450,32 +1451,44 @@ def run_batch_upload(batch_files):
                                      '<extra></extra>'
                     ))
                 
-                # Update layout for better 3D visualization
+                # Update layout for modern dark 3D visualization
                 fig_3d.update_layout(
+                    template='plotly_dark',
+                    paper_bgcolor='#000000',
                     title=dict(
                         text='🎵 Your Recordings in 3D Acoustic Space',
-                        font=dict(size=20, color='#1e293b'),
+                        font=dict(size=20, color='#e5e7eb'),
                         x=0.5,
                         xanchor='center'
                     ),
                     scene=dict(
+                        bgcolor='#000000',
                         xaxis=dict(
-                            title='UMAP Dimension 1',
-                            backgroundcolor='rgb(240, 240, 240)',
-                            gridcolor='white',
-                            showbackground=True
+                            title=dict(text='UMAP Dimension 1', font=dict(color='#e5e7eb')),
+                            gridcolor='#333333',
+                            zeroline=False,
+                            showbackground=False,
+                            showgrid=True,
+                            color='#e5e7eb',
+                            tickfont=dict(color='#9ca3af')
                         ),
                         yaxis=dict(
-                            title='UMAP Dimension 2',
-                            backgroundcolor='rgb(240, 240, 240)',
-                            gridcolor='white',
-                            showbackground=True
+                            title=dict(text='UMAP Dimension 2', font=dict(color='#e5e7eb')),
+                            gridcolor='#333333',
+                            zeroline=False,
+                            showbackground=False,
+                            showgrid=True,
+                            color='#e5e7eb',
+                            tickfont=dict(color='#9ca3af')
                         ),
                         zaxis=dict(
-                            title='UMAP Dimension 3',
-                            backgroundcolor='rgb(240, 240, 240)',
-                            gridcolor='white',
-                            showbackground=True
+                            title=dict(text='UMAP Dimension 3', font=dict(color='#e5e7eb')),
+                            gridcolor='#333333',
+                            zeroline=False,
+                            showbackground=False,
+                            showgrid=True,
+                            color='#e5e7eb',
+                            tickfont=dict(color='#9ca3af')
                         ),
                         camera=dict(
                             eye=dict(x=1.5, y=1.5, z=1.3)
@@ -1489,12 +1502,21 @@ def run_batch_upload(batch_files):
                         y=0.99,
                         xanchor='left',
                         x=0.01,
-                        bgcolor='rgba(255, 255, 255, 0.9)',
-                        bordercolor='#cbd5e1',
-                        borderwidth=1
+                        bgcolor='rgba(0,0,0,0)',
+                        bordercolor='#374151',
+                        borderwidth=1,
+                        font=dict(color='#e5e7eb')
                     ),
-                    hovermode='closest'
+                    hovermode='closest',
+                    margin=dict(l=0, r=0, t=60, b=0),
+                    hoverlabel=dict(
+                        bgcolor='rgba(17,17,17,0.95)',
+                        bordercolor='#374151',
+                        font_color='#e5e7eb'
+                    )
                 )
+                # Ensure text labels are readable on dark background
+                fig_3d.update_traces(textfont=dict(color='#e5e7eb', size=10))
                 
                 st.plotly_chart(fig_3d, use_container_width=True)
                 
@@ -2140,15 +2162,33 @@ def show_acoustic_map():
 def show_geo_acoustic_map():
     """Render folium map with last analysis coordinates and status."""
     st.header("🌍 Geo-Acoustic Map")
+    # Map controls
+    col_map1, col_map2, col_map3 = st.columns([1, 1, 1])
+    with col_map1:
+        basemap = st.selectbox(
+            "Basemap style",
+            ["Carto Dark", "Carto Light", "OpenStreetMap", "Stamen Terrain"],
+            index=0,
+            help="Choose a background map for better contrast"
+        )
+    with col_map2:
+        show_minimap = st.checkbox("Minimap", value=True)
+    with col_map3:
+        show_fullscreen = st.checkbox("Fullscreen control", value=True)
     # Lazy import to handle cases where dependencies were installed after app start
     local_folium = folium
     local_st_folium = st_folium
+    local_plugins = None
     if local_folium is None or local_st_folium is None:
         try:
             import importlib
             local_folium = importlib.import_module('folium')
             _sf_mod = importlib.import_module('streamlit_folium')
             local_st_folium = getattr(_sf_mod, 'st_folium')
+            try:
+                local_plugins = importlib.import_module('folium.plugins')
+            except Exception:
+                local_plugins = None
             # Update globals for future calls
             globals()['folium'] = local_folium
             globals()['st_folium'] = local_st_folium
@@ -2157,6 +2197,11 @@ def show_geo_acoustic_map():
             st.caption(f"Python: {sys.executable}")
             st.caption(f"Import error: {e}")
             return
+    else:
+        try:
+            from folium import plugins as local_plugins  # type: ignore
+        except Exception:
+            local_plugins = None
 
     last = st.session_state.get('last_analysis') or {}
     lat = last.get('lat')
@@ -2176,18 +2221,138 @@ def show_geo_acoustic_map():
     else:
         color = 'red'
 
-    m = local_folium.Map(location=[lat, lon], zoom_start=6, tiles='OpenStreetMap')
-    popup = f"Health: {health or '—'}<br>Noise: {noise or '—'}<br>Coords: {lat:.6f}, {lon:.6f}"
-    local_folium.CircleMarker(
+    # Create map without default tiles to allow user-selected basemap
+    m = local_folium.Map(location=[lat, lon], zoom_start=6, tiles=None, control_scale=True)
+
+    # Basemap selection
+    if basemap == "Carto Dark":
+        local_folium.TileLayer('CartoDB dark_matter', name='Carto Dark').add_to(m)
+    elif basemap == "Carto Light":
+        local_folium.TileLayer('CartoDB positron', name='Carto Light').add_to(m)
+    elif basemap == "Stamen Terrain":
+        local_folium.TileLayer('Stamen Terrain', name='Stamen Terrain').add_to(m)
+    else:
+        local_folium.TileLayer('OpenStreetMap', name='OpenStreetMap').add_to(m)
+
+    # Optional controls
+    if show_fullscreen and local_plugins is not None and hasattr(local_plugins, 'Fullscreen'):
+        local_plugins.Fullscreen(position='topright').add_to(m)
+    if show_minimap and local_plugins is not None and hasattr(local_plugins, 'MiniMap'):
+        try:
+            mini = local_plugins.MiniMap(toggle_display=True, minimized=False)
+            mini.add_to(m)
+        except Exception:
+            pass
+
+    # Marker cluster (useful if session has history)
+    marker_layer = None
+    if local_plugins is not None and hasattr(local_plugins, 'MarkerCluster'):
+        try:
+            marker_layer = local_plugins.MarkerCluster(name='Reef Samples')
+            marker_layer.add_to(m)
+        except Exception:
+            marker_layer = None
+
+    # Build popup HTML with health badge
+    badge_color = {'green': '#10b981', 'red': '#ef4444', 'purple': '#8b5cf6'}.get(color, '#60a5fa')
+    popup_html = f"""
+    <div style='font-family:Inter,system-ui,Segoe UI,Roboto,Arial; font-size:13px; color:#e5e7eb;'>
+      <div style='margin-bottom:6px;'>
+        <span style='background:{badge_color}; color:white; padding:2px 8px; border-radius:9999px; font-weight:600;'>
+          {health or '—'}
+        </span>
+        <span style='margin-left:8px; color:#cbd5e1;'>Noise: {noise or '—'}</span>
+      </div>
+      <div style='color:#cbd5e1;'>📍 {lat:.6f}, {lon:.6f}</div>
+    </div>
+    """
+    popup = local_folium.Popup(local_folium.IFrame(popup_html, width=240, height=90), max_width=260)
+
+    marker = local_folium.CircleMarker(
         location=[lat, lon],
         radius=10,
         color=color,
         fill=True,
-        fill_opacity=0.8,
-        popup=popup
-    ).add_to(m)
+        fill_opacity=0.9,
+        popup=popup,
+        tooltip=f"{health or 'Status'} • Noise: {noise or '—'}"
+    )
+    if marker_layer is not None:
+        marker.add_to(marker_layer)
+    else:
+        marker.add_to(m)
 
-    local_st_folium(m, width=None, height=500)
+    # Plot any available history from session state
+    history = st.session_state.get('analysis_history') or []
+    for item in history:
+        try:
+            h_lat = item.get('lat'); h_lon = item.get('lon')
+            if not h_lat or not h_lon:
+                continue
+            h_health = item.get('health_label')
+            h_noise = item.get('noise_label')
+            if h_health == 'Healthy' and (h_noise or '').lower() != 'high':
+                h_color = 'green'
+            elif (h_noise or '').lower() == 'high':
+                h_color = 'purple'
+            else:
+                h_color = 'red'
+            h_badge = {'green': '#10b981', 'red': '#ef4444', 'purple': '#8b5cf6'}.get(h_color, '#60a5fa')
+            h_popup_html = f"""
+            <div style='font-family:Inter,system-ui,Segoe UI,Roboto,Arial; font-size:12px; color:#e5e7eb;'>
+              <div style='margin-bottom:4px;'>
+                <span style='background:{h_badge}; color:white; padding:1px 6px; border-radius:9999px; font-weight:600;'>
+                  {h_health or '—'}
+                </span>
+                <span style='margin-left:6px; color:#cbd5e1;'>Noise: {h_noise or '—'}</span>
+              </div>
+              <div style='color:#cbd5e1;'>📍 {h_lat:.6f}, {h_lon:.6f}</div>
+            </div>
+            """
+            h_popup = local_folium.Popup(local_folium.IFrame(h_popup_html, width=220, height=80), max_width=240)
+            h_marker = local_folium.CircleMarker(
+                location=[h_lat, h_lon],
+                radius=7,
+                color=h_color,
+                fill=True,
+                fill_opacity=0.85,
+                popup=h_popup,
+                tooltip=f"{h_health or 'Status'} • Noise: {h_noise or '—'}"
+            )
+            if marker_layer is not None:
+                h_marker.add_to(marker_layer)
+            else:
+                h_marker.add_to(m)
+        except Exception:
+            continue
+
+    # Add a simple legend
+    legend_html = """
+    <div style='position: fixed; bottom: 20px; left: 20px; z-index: 9999; background: rgba(17,17,17,0.85); padding: 10px 12px; border-radius: 8px; color: #e5e7eb; font-family: Inter,system-ui,Segoe UI,Roboto,Arial; font-size: 12px; border: 1px solid #374151;'>
+      <div style='font-weight: 600; margin-bottom: 6px;'>Legend</div>
+      <div style='display:flex; align-items:center; gap:6px; margin-bottom:4px;'>
+        <span style='width:10px; height:10px; background:#10b981; border-radius:50%; display:inline-block;'></span>
+        <span>Healthy</span>
+      </div>
+      <div style='display:flex; align-items:center; gap:6px; margin-bottom:4px;'>
+        <span style='width:10px; height:10px; background:#ef4444; border-radius:50%; display:inline-block;'></span>
+        <span>Degraded</span>
+      </div>
+      <div style='display:flex; align-items:center; gap:6px;'>
+        <span style='width:10px; height:10px; background:#8b5cf6; border-radius:50%; display:inline-block;'></span>
+        <span>High Noise</span>
+      </div>
+    </div>
+    """
+    m.get_root().html.add_child(local_folium.Element(legend_html))
+
+    # Layer control when multiple layers are present
+    try:
+        local_folium.LayerControl(position='topright').add_to(m)
+    except Exception:
+        pass
+
+    local_st_folium(m, width=None, height=520)
 
 
 def extract_gps_and_datetime(file_path: str):
