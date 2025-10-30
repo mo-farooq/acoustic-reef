@@ -117,31 +117,96 @@ def save_umap_artifacts(coords: np.ndarray, umap_model: umap.UMAP, labels_df: pd
         logger.error(f"Failed to save UMAP artifacts: {e}")
         return False
 
+def generate_umap_visualization_3d() -> Tuple[Optional[np.ndarray], Optional[umap.UMAP], Optional[pd.DataFrame]]:
+    """
+    Generate 3D UMAP coordinates and model for acoustic map visualization.
+    Returns:
+        Tuple of (coordinates, umap_model, labels_df) or (None, None, None) if failed
+    """
+    try:
+        logger.info("Loading embeddings for 3D UMAP...")
+        X_emb, emb_df = load_embeddings_from_csv()
+        logger.info(f"Loaded {X_emb.shape[0]} samples with {X_emb.shape[1]} features (3D)")
+        labels = []
+        filenames = []
+        for idx, row in emb_df.iterrows():
+            filepath = row.get('filepath', f'sample_{idx}')
+            filename = filepath.split('/')[-1] if '/' in filepath else filepath
+            filenames.append(filename)
+            category = row.get('category', 'healthy')
+            labels.append(category)
+        labels_df = pd.DataFrame({
+            'filename': filenames,
+            'health_status': labels
+        })
+        logger.info("Creating 3D UMAP reducer...")
+        umap_reducer = umap.UMAP(
+            n_components=3,
+            n_neighbors=15,
+            min_dist=0.1,
+            metric='cosine',
+            random_state=42,
+            verbose=True
+        )
+        logger.info("Fitting 3D UMAP...")
+        coords = umap_reducer.fit_transform(X_emb)
+        logger.info(f"3D UMAP coordinates shape: {coords.shape}")
+        return coords, umap_reducer, labels_df
+    except Exception as e:
+        logger.error(f"Failed to generate 3D UMAP: {e}")
+        return None, None, None
+
+def save_umap_artifacts_3d(coords: np.ndarray, umap_model: umap.UMAP, labels_df: pd.DataFrame) -> bool:
+    """
+    Save 3D UMAP coordinates and model to files.
+    Args:
+        coords: 3D coordinates from UMAP
+        umap_model: Trained UMAP model
+        labels_df: DataFrame with labels for coloring
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Save UMAP model
+        logger.info(f"Saving 3D UMAP model to {UMAP_MODEL_PATH}")
+        joblib.dump(umap_model, UMAP_MODEL_PATH)
+        # Optionally, save coordinates
+        coords_3d_df = pd.DataFrame({
+            'x': coords[:, 0],
+            'y': coords[:, 1],
+            'z': coords[:, 2],
+            'label': labels_df.get('health_status', 'unknown'),
+            'filename': labels_df.get('filename', 'unknown')
+        })
+        out_csv = UMAP_COORDS_CSV
+        logger.info(f"Saving 3D coordinates to {out_csv}")
+        coords_3d_df.to_csv(out_csv, index=False)
+        logger.info("3D UMAP artifacts saved successfully!")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save 3D UMAP artifacts: {e}")
+        return False
+
 def main():
     """Main function to generate UMAP visualization files."""
     logger.info("Starting UMAP generation for Acoustic Map...")
-    
-    # Check if files already exist
+    # 2D UMAP Generation
     if UMAP_COORDS_CSV.exists() and UMAP_MODEL_PATH.exists():
-        logger.info("UMAP files already exist. Skipping generation.")
-        return
-    
-    # Generate UMAP
-    coords, umap_model, labels_df = generate_umap_visualization()
-    
-    if coords is None or umap_model is None or labels_df is None:
-        logger.error("Failed to generate UMAP visualization")
-        return
-    
-    # Save artifacts
-    success = save_umap_artifacts(coords, umap_model, labels_df)
-    
-    if success:
-        logger.info("✅ UMAP generation completed successfully!")
-        logger.info(f"📁 Coordinates: {UMAP_COORDS_CSV}")
-        logger.info(f"🤖 Model: {UMAP_MODEL_PATH}")
+        logger.info("UMAP files already exist. Skipping 2D generation.")
     else:
-        logger.error("❌ UMAP generation failed")
+        coords, umap_model, labels_df = generate_umap_visualization()
+        if coords is not None and umap_model is not None and labels_df is not None:
+            save_umap_artifacts(coords, umap_model, labels_df)
+    # 3D UMAP Generation
+    from src.utils import config
+    if not UMAP_MODEL_PATH.exists():
+        coords3d, umap_model3d, labels_df3d = generate_umap_visualization_3d()
+        if coords3d is not None and umap_model3d is not None and labels_df3d is not None:
+            save_umap_artifacts_3d(coords3d, umap_model3d, labels_df3d)
+        else:
+            logger.error("Failed to generate 3D UMAP visualization")
+    else:
+        logger.info("3D UMAP model already exists. Skipping 3D generation.")
 
 if __name__ == "__main__":
     main()

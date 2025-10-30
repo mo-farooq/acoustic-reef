@@ -34,7 +34,13 @@ def force_load_real_model():
         if not model_path.exists():
             raise FileNotFoundError(f"Model not found at {model_path}")
         
-        logger.info("🔧 FORCING REAL MODEL TO LOAD...")
+        # Log sklearn version and model path to verify runtime environment
+        try:
+            import sklearn
+            logger.info(f"scikit-learn runtime version: {getattr(sklearn, '__version__', 'unknown')}")
+        except Exception:
+            logger.info("scikit-learn not importable for version check")
+        logger.info(f"🔧 FORCING REAL MODEL TO LOAD from: {model_path}")
         
         # Method 1: Try to load with compatibility mode
         try:

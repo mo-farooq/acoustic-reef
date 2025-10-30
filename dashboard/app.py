@@ -661,14 +661,14 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                     
                     st.markdown(f"# {health_icon} {result.health_label}")
                     
-                    if result.health_conf is not None:
-                        conf_level, conf_icon = get_confidence_level(result.health_conf)
-                        st.metric(
-                            "Confidence Level", 
-                            f"{result.health_conf:.0%}",
-                            delta=f"{conf_level}",
-                            help=f"{conf_icon} {conf_level} confidence"
-                        )
+                if result.health_conf is not None:
+                    conf_level, conf_icon = get_confidence_level(result.health_conf)
+                    st.metric(
+                        "Confidence Level", 
+                        f"{result.health_conf:.0%}",
+                        delta=f"{conf_level}",
+                        help=f"{conf_icon} {conf_level} confidence"
+                    )
             
             with col2:
                 # Noise pollution using native containers
@@ -682,14 +682,14 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                     
                     st.markdown(f"# {noise_icon} {result.noise_label}")
                     
-                    if result.noise_conf is not None:
-                        conf_level, conf_icon = get_confidence_level(result.noise_conf)
-                        st.metric(
-                            "Confidence Level",
-                            f"{result.noise_conf:.0%}",
-                            delta=f"{conf_level}",
-                            help=f"{conf_icon} {conf_level} confidence"
-                        )
+                if result.noise_conf is not None:
+                    conf_level, conf_icon = get_confidence_level(result.noise_conf)
+                    st.metric(
+                        "Confidence Level",
+                        f"{result.noise_conf:.0%}",
+                        delta=f"{conf_level}",
+                        help=f"{conf_icon} {conf_level} confidence"
+                    )
 
             # Environmental Context based on coordinates/date
             st.header("🌿 Environmental Context")
@@ -1368,34 +1368,33 @@ def run_batch_upload(batch_files):
             
             # Define 3D UMAP model path
             UMAP_MODEL_3D_PATH = CLASSIFIER_MODEL_DIR / "umap_model_3d.joblib"
-            
-            if not UMAP_MODEL_3D_PATH.exists():
+            umap_model_3d = None  # Always define
+            if UMAP_MODEL_3D_PATH.exists():
+                umap_model_3d = joblib.load(UMAP_MODEL_3D_PATH)
+                st.success("✅ Loaded 3D UMAP model successfully")
+            else:
                 st.warning("3D UMAP model not found. Showing 2D visualization instead.")
-                # Fall back to 2D
+                # Optionally: return or skip 3D transform logic entirely
+
             base_df = load_umap_coordinates()
             if base_df is not None and not base_df.empty:
                 cluster_labels, cluster_info = identify_acoustic_clusters(base_df, method='kmeans', n_clusters=3)
-            else:
-                umap_model_3d = joblib.load(UMAP_MODEL_3D_PATH)
-                st.success("✅ Loaded 3D UMAP model successfully")
-                
+
             # Transform user embeddings to 3D UMAP coordinates
             st.info("🔄 Transforming your recordings into 3D acoustic space...")
-            
             user_embeddings_array = np.array(user_embeddings)
-            if UMAP_MODEL_3D_PATH.exists():
+            user_coords_3d = None
+            if umap_model_3d is not None:
                 user_coords_3d = umap_model_3d.transform(user_embeddings_array)
-            else:
-                # Fallback to 2D
-                user_coords_3d = None
-                user_coords = []
-                for embedding in user_embeddings:
-                    from src.inference import transform_with_umap
-                    coord = transform_with_umap(embedding.reshape(1, -1))
-                    if coord is not None:
-                        user_coords.append(coord[0])
-                    else:
-                        user_coords.append([0, 0])
+            # else keep as None and skip 3D plotting logic
+            from src.inference import transform_with_umap
+            user_coords = []
+            for embedding in user_embeddings:
+                coord = transform_with_umap(embedding.reshape(1, -1))
+                if coord is not None:
+                    user_coords.append(coord[0])
+                else:
+                    user_coords.append([0, 0])
             
             # Create 3D visualization if available
             if user_coords_3d is not None:
@@ -1404,7 +1403,7 @@ def run_batch_upload(batch_files):
                     'x': user_coords_3d[:, 0],
                     'y': user_coords_3d[:, 1],
                     'z': user_coords_3d[:, 2],
-                'filename': user_filenames,
+                    'filename': user_filenames,
                     'health_status': user_labels,
                     'confidence': [f"{rows[i]['confidence']}" if i < len(rows) else "N/A" for i in range(len(user_filenames))],
                     'noise': [rows[i]['noise'] if i < len(rows) else "N/A" for i in range(len(user_filenames))]
@@ -1601,8 +1600,7 @@ def run_batch_upload(batch_files):
                         st.success(f"{dominant_pct:.0f}% are {dominant_health}")
                     elif consistency_color == "info":
                         st.info(f"{dominant_pct:.0f}% are {dominant_health}")
-                    else:
-                        st.warning(f"Only {dominant_pct:.0f}% are {dominant_health}")
+                
                 
                 # Simplified Health Distribution with Visual Guide
                 st.markdown("---")
@@ -1860,11 +1858,11 @@ def run_batch_upload(batch_files):
                 
                 # Simple but enhanced 2D scatter plot
                 fig_2d = px.scatter(
-                    user_df,
-                    x='x',
-                    y='y',
-                    color='health_status',
-                    hover_data=['filename'],
+                        user_df,
+                        x='x',
+                        y='y',
+                        color='health_status',
+                        hover_data=['filename'],
                     title="🗺️ Your Recordings in 2D Acoustic Space",
                     color_discrete_map={'Healthy': '#10b981', 'Degraded': '#ef4444'},
                     labels={'x': 'Sound Characteristic 1', 'y': 'Sound Characteristic 2'}
@@ -1925,7 +1923,7 @@ def run_batch_upload(batch_files):
                 **What this means:**
                 Your reef is experiencing some challenges but still has healthy areas. This is a critical 
                 time to intervene and prevent further degradation.
-                
+            
                 **Action needed:** Focus on protecting healthy areas while addressing stressed zones.
                 """)
             else:

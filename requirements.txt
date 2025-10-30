@@ -5,7 +5,8 @@ streamlit>=1.28.0
 # AI/ML Framework
 # Pin versions for TensorFlow compatibility on Windows/py311
 tensorflow==2.20.0
-scikit-learn>=1.3.0
+# Pin scikit-learn to match trained model version for pickle compatibility
+scikit-learn==1.2.2
 numpy>=1.26,<2.0
 pandas>=2.0.0
 
