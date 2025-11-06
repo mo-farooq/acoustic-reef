@@ -360,19 +360,57 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
     
     st.markdown('<h2 class="sub-header">🔍 Audio Analysis</h2>', unsafe_allow_html=True)
     
-    # Create temporary file
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
+    # Create temporary file with original extension preserved
+    original_suffix = os.path.splitext(uploaded_file.name)[1] if hasattr(uploaded_file, 'name') and uploaded_file.name else '.wav'
+    with tempfile.NamedTemporaryFile(delete=False, suffix=original_suffix) as tmp_file:
         tmp_file.write(uploaded_file.getvalue())
         tmp_path = tmp_file.name
     
+    # Convert to WAV if needed
+    converted_path = tmp_path
+    needs_conversion = False
+    
     try:
         with st.spinner("Processing audio and generating embeddings..."):
-            # Basic WAV metadata without external deps
-            with contextlib.closing(wave.open(tmp_path, 'rb')) as wf:
-                n_channels = wf.getnchannels()
-                sr = wf.getframerate()
-                n_frames = wf.getnframes()
-                duration_sec = n_frames / float(sr) if sr else 0.0
+            # Try to open as WAV first
+            try:
+                with contextlib.closing(wave.open(tmp_path, 'rb')) as wf:
+                    n_channels = wf.getnchannels()
+                    sr = wf.getframerate()
+                    n_frames = wf.getnframes()
+                    duration_sec = n_frames / float(sr) if sr else 0.0
+            except (wave.Error, ValueError) as e:
+                # Not a valid WAV file, try converting with librosa
+                needs_conversion = True
+                try:
+                    import librosa
+                    import soundfile as sf
+                    
+                    st.info("📦 Converting audio file to WAV format...")
+                    # Load audio with librosa (handles many formats)
+                    audio_data, sr = librosa.load(tmp_path, sr=None, mono=False)
+                    # Ensure audio is in correct shape for soundfile
+                    if audio_data.ndim == 1:
+                        n_channels = 1
+                        audio_data_2d = audio_data.reshape(-1, 1)
+                    else:
+                        n_channels = audio_data.shape[0]
+                        audio_data_2d = audio_data.T  # librosa returns (channels, samples), soundfile needs (samples, channels)
+                    
+                    # Create converted WAV file
+                    converted_path = tmp_path.replace(original_suffix, '.wav')
+                    sf.write(converted_path, audio_data_2d, sr, subtype='PCM_16')
+                    
+                    n_frames = len(audio_data_2d)
+                    duration_sec = n_frames / float(sr) if sr else 0.0
+                    
+                    # Update tmp_path to use converted file
+                    if converted_path != tmp_path and os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
+                    tmp_path = converted_path
+                    
+                except Exception as conv_e:
+                    raise ValueError(f"Could not read audio file. The file may be corrupted or in an unsupported format. Original error: {str(e)}. Conversion error: {str(conv_e)}")
 
             # Attempt GPS/date metadata extraction from file header
             extracted_lat, extracted_lon, recording_dt = extract_gps_and_datetime(tmp_path)
