@@ -66,10 +66,10 @@ acoustic-reef/
 ---
 
 ## 👩‍💻 Team
-- **Project Lead & Integrator**: Managing GitHub, sprint planning, and final AI model integration
-- **Data Lead**: TBD  
-- **AI/ML Lead**: TBD  
-- **UI/UX Lead**: TBD  
+- **Onkar Damale** - Project Lead & AI/ML Lead
+- **Om Niungare** - Research & API Integration Lead
+- **Farooq** - Data Curation & Management Lead
+- **Shyamsundar Gitte** - UI/UX & Dashboard Design Lead  
 
 ---
 
