@@ -45,8 +45,10 @@ UMAP_COORDS_CSV = PROCESSED_DATA_DIR / "umap_coordinates.csv"
 UMAP_MODEL_PATH = CLASSIFIER_MODEL_DIR / "umap_model.joblib"
 UMAP_MODEL_3D_PATH = CLASSIFIER_MODEL_DIR / "umap_model_3d.joblib"
 
+from typing import Dict, List, Union
+
 # Audio processing settings
-AUDIO_SETTINGS = {
+AUDIO_SETTINGS: Dict[str, Union[int, float]] = {
     "target_sample_rate": 32000,
     "max_duration": 60.0,  # seconds
     "min_duration": 1.0,   # seconds
@@ -56,14 +58,14 @@ AUDIO_SETTINGS = {
 }
 
 # SurfPerch model settings
-SURFPERCH_SETTINGS = {
+SURFPERCH_SETTINGS: Dict[str, Union[int, Path]] = {
     "embedding_dim": 1280,  # Kaggle export embeddings
     "target_sample_rate": 32000,
     "model_path": SURFPERCH_TF_SAVEDMODEL_DIR
 }
 
 # Classifier settings
-CLASSIFIER_SETTINGS = {
+CLASSIFIER_SETTINGS: Dict[str, Union[str, float, int]] = {
     "model_type": "random_forest",  # or "logistic_regression", "svm"
     "test_size": 0.2,
     "random_state": 42,
@@ -71,7 +73,7 @@ CLASSIFIER_SETTINGS = {
 }
 
 # Dashboard settings
-DASHBOARD_SETTINGS = {
+DASHBOARD_SETTINGS: Dict[str, Union[str, int, List[str]]] = {
     "page_title": "Acoustic Reef",
     "page_icon": "🌊",
     "layout": "wide",
@@ -80,7 +82,7 @@ DASHBOARD_SETTINGS = {
 }
 
 # Logging settings
-LOGGING_SETTINGS = {
+LOGGING_SETTINGS: Dict[str, Union[str, Path]] = {
     "level": "INFO",
     "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     "file": PROJECT_ROOT / "logs" / "acoustic_reef.log"
