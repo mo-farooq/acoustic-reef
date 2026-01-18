@@ -117,10 +117,16 @@ def find_embedding_for_filename(emb_df: pd.DataFrame, filename: str) -> Optional
 
 
 def compute_embedding_from_audio(audio_np: np.ndarray, sample_rate: int) -> np.ndarray:
-    sp = get_surfperch_model()
-    processed = sp.preprocess_audio(audio_np, sample_rate)
-    emb = sp.generate_embeddings(processed, 32000)
-    return emb.reshape(1, -1) if emb.ndim == 2 else emb
+    try:
+        sp = get_surfperch_model()
+        processed = sp.preprocess_audio(audio_np, sample_rate)
+        emb = sp.generate_embeddings(processed, 32000)
+        return emb.reshape(1, -1) if emb.ndim == 2 else emb
+    except Exception as e:
+        logger.error(f"Error computing embedding from audio: {e}")
+        # Return a zero embedding as fallback or re-raise depending on requirements.
+        # Here we re-raise to alert the caller, but logged it first.
+        raise
 
 
 @dataclass
