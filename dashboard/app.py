@@ -8,9 +8,6 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
-# import librosa  # Commented out for now due to installation issues
-# import matplotlib.pyplot as plt  # Commented out for now due to installation issues
-# import seaborn as sns  # Commented out for now due to installation issues
 from pathlib import Path
 import tempfile
 import os
