@@ -81,7 +81,14 @@ cd acoustic-reef
 pip install -r requirements.txt
 
 streamlit run dashboard/app.py
-```
+\`\`\`
+
+## 🛠 Development
+To contribute to this project:
+1. Create a virtual environment: `python -m venv venv`
+2. Activate it: `source venv/bin/activate` (Linux/Mac) or `venv\Scripts\activate` (Windows)
+3. Install dependencies: `pip install -r requirements.txt`
+4. Run tests: `pytest`
 
 ---
 
