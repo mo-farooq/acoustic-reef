@@ -28,10 +28,17 @@ class ReefClassifier:
     
     def __init__(self, model_type: str = 'random_forest'):
         """
-        Initialize reef classifier
+        Initialize the ReefClassifier with a specific model type.
         
+        This initializes the health and anthrophony classifiers but does not train them.
+        Call the train() method to train the models on data.
+
         Args:
-            model_type: Type of classifier ('random_forest', 'logistic_regression', 'svm')
+            model_type (str): Type of classifier to use. Options are:
+                              'random_forest' (default), 'logistic_regression', 'svm'.
+        
+        Raises:
+            ValueError: If an unknown model_type is provided.
         """
         self.model_type = model_type
         self.health_classifier = None
