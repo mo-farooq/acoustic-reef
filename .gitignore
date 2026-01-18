@@ -20,8 +20,6 @@ parts/
 sdist/
 var/
 wheels/
-pip-wheel-metadata/
-share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
@@ -84,19 +82,8 @@ ipython_config.py
 # pyenv
 .python-version
 
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
-
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow
-__pypackages__/
-
-# Celery stuff
+# celery beat schedule file
 celerybeat-schedule
-celerybeat.pid
 
 # SageMath parsed files
 *.sage.py
@@ -127,44 +114,6 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
-
-# Acoustic Reef specific
-# Audio data files
-data/raw/*.wav
-data/raw/*.mp3
-data/raw/*.flac
-data/processed/*.wav
-data/processed/*.mp3
-data/processed/*.flac
-
-# Model files (large files)
-models/surfperch/*.pb
-models/surfperch/*.h5
-models/classifiers/*.pkl
-models/classifiers/*.joblib
-
-# Embeddings (large numpy arrays)
-data/embeddings/*.npy
-data/embeddings/*.npz
-
-# Logs
-logs/
-*.log
-
-# Temporary files
-temp/
-tmp/
-*.tmp
-
-# IDE files
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS files
-.DS_Store
-Thumbs.db
 
 # Streamlit
 .streamlit/
