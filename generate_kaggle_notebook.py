@@ -1,0 +1,322 @@
+
+import json
+import os
+
+notebook_content = {
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Acoustic Reef: Model Retraining with Google SurfPerch\n",
+    "\n",
+    "This notebook allows you to retrain the Acoustic Reef health classifier using the Google SurfPerch model on Kaggle. \n",
+    "\n",
+    "## Instructions\n",
+    "1. **Add Data**: Upload your audio dataset to Kaggle. You should have a CSV file (e.g., `labels.csv`) mapping filenames to labels.\n",
+    "2. **Enable GPU/Internet**: Ensure Internet access is enabled in Settings to download the SurfPerch model.\n",
+    "3. **Run All**: Execute all cells to train and save the model."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": None,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Install dependencies\n",
+    "!pip install -q tensorflow_hub librosa scikit-learn seaborn"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": None,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import os\n",
+    "import numpy as np\n",
+    "import pandas as pd\n",
+    "import tensorflow as tf\n",
+    "import tensorflow_hub as hub\n",
+    "import librosa\n",
+    "import matplotlib.pyplot as plt\n",
+    "import seaborn as sns\n",
+    "import joblib\n",
+    "from sklearn.model_selection import train_test_split, cross_val_score\n",
+    "from sklearn.ensemble import RandomForestClassifier\n",
+    "from sklearn.preprocessing import StandardScaler\n",
+    "from sklearn.metrics import classification_report, confusion_matrix, accuracy_score\n",
+    "\n",
+    "print(f\"TensorFlow version: {tf.__version__}\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Configuration\n",
+    "Set the paths to your dataset and output directory."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": None,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# --- CONFIGURATION ---\n",
+    "# Path to the CSV file containing labels\n",
+    "# CSV Format expected: filepath,health_label,anthro_label\n",
+    "LABELS_CSV_PATH = \"/kaggle/input/acoustic-reef-data/labels.csv\" \n",
+    "\n",
+    "# Root directory for audio files (if paths in CSV are relative)\n",
+    "AUDIO_ROOT_DIR = \"/kaggle/input/acoustic-reef-data/audio_files\"\n",
+    "\n",
+    "# Output directory for the trained model\n",
+    "OUTPUT_DIR = \"/kaggle/working/models\"\n",
+    "os.makedirs(OUTPUT_DIR, exist_ok=True)\n",
+    "# ---------------------"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 1. Load SurfPerch Model\n",
+    "We load the pre-trained SurfPerch model from TensorFlow Hub."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": None,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "print(\"Loading SurfPerch model from TFHub...\")\n",
+    "model = hub.load(\"https://tfhub.dev/google/surfperch/1\")\n",
+    "print(\"Model loaded successfully!\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": None,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def load_and_preprocess_audio(file_path, target_sr=32000):\n",
+    "    \"\"\"Load audio and resample to 32kHz for SurfPerch.\"\"\"\n",
+    "    try:\n",
+    "        # Load with librosa (auto-resamples if sr specified)\n",
+    "        audio, _ = librosa.load(file_path, sr=target_sr, mono=True)\n",
+    "        \n",
+    "        # Normalize\n",
+    "        max_abs = np.max(np.abs(audio))\n",
+    "        if max_abs > 0:\n",
+    "            audio = audio / max_abs\n",
+    "            \n",
+    "        # Ensure minimum length (1s)\n",
+    "        if len(audio) < target_sr:\n",
+    "            audio = np.pad(audio, (0, target_sr - len(audio)))\n",
+    "            \n",
+    "        return audio\n",
+    "    except Exception as e:\n",
+    "        print(f\"Error loading {file_path}: {e}\")\n",
+    "        return None\n",
+    "\n",
+    "def get_embedding(audio_data):\n",
+    "    \"\"\"Generate embedding using SurfPerch.\"\"\"\n",
+    "    # Prepare input: [1, length]\n",
+    "    audio_tensor = tf.convert_to_tensor(audio_data[np.newaxis, :], dtype=tf.float32)\n",
+    "    \n",
+    "    # Inference\n",
+    "    output = model.signatures['serving_default'](audio_tensor)\n",
+    "    \n",
+    "    # Extract embedding (key 'embedding' or 'output_0')\n",
+    "    if 'embedding' in output:\n",
+    "        emb = output['embedding']\n",
+    "    else:\n",
+    "        emb = next(iter(output.values()))\n",
+    "        \n",
+    "    return emb.numpy()[0]  # Return 1D array"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 2. Process Dataset\n",
+    "Load audio files and generate embeddings."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": None,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "if os.path.exists(LABELS_CSV_PATH):\n",
+    "    df = pd.read_csv(LABELS_CSV_PATH)\n",
+    "    print(f\"Loaded {len(df)} labels from CSV.\")\n",
+    "else:\n",
+    "    print(f\"WARNING: Labels CSV not found at {LABELS_CSV_PATH}. Creating dummy data for demonstration.\")\n",
+    "    # Dummy data generation if file blocked\n",
+    "    df = pd.DataFrame({\n",
+    "        'filepath': ['dummy_healthy.wav', 'dummy_degraded.wav'],\n",
+    "        'health_label': [1, 0],\n",
+    "        'anthro_label': [0, 1]\n",
+    "    })\n",
+    "\n",
+    "embeddings = []\n",
+    "valid_indices = []\n",
+    "\n",
+    "print(\"Generating embeddings...\")\n",
+    "for idx, row in df.iterrows():\n",
+    "    # Resolve full path\n",
+    "    fname = row['filepath']\n",
+    "    full_path = os.path.join(AUDIO_ROOT_DIR, fname) if not os.path.isabs(fname) else fname\n",
+    "    \n",
+    "    if not os.path.exists(full_path) and not \"dummy\" in fname:\n",
+    "        # Try looking in current dir as fallback\n",
+    "        if os.path.exists(fname):\n",
+    "            full_path = fname\n",
+    "        else:\n",
+    "            print(f\"File not found: {full_path}\")\n",
+    "            continue\n",
+    "            \n",
+    "    if \"dummy\" in fname:\n",
+    "        # Generate random embedding for demo\n",
+    "        emb = np.random.normal(size=(1280,))\n",
+    "    else:\n",
+    "        audio = load_and_preprocess_audio(full_path)\n",
+    "        if audio is None:\n",
+    "            continue\n",
+    "        emb = get_embedding(audio)\n",
+    "        \n",
+    "    embeddings.append(emb)\n",
+    "    valid_indices.append(idx)\n",
+    "\n",
+    "X = np.array(embeddings)\n",
+    "df_clean = df.loc[valid_indices].reset_index(drop=True)\n",
+    "y_health = df_clean['health_label'].values\n",
+    "y_anthro = df_clean['anthro_label'].values\n",
+    "\n",
+    "print(f\"\\nProcessed {len(X)} samples.\")\n",
+    "print(f\"Embeddings shape: {X.shape}\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 3. Train Classifier\n",
+    "Train Random Forest classifiers for Health and Anthrophony."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": None,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Scale features\n",
+    "scaler = StandardScaler()\n",
+    "X_scaled = scaler.fit_transform(X)\n",
+    "\n",
+    "# Initialize models\n",
+    "clf_health = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced')\n",
+    "clf_anthro = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced')\n",
+    "\n",
+    "# Split data\n",
+    "X_train, X_test, yh_train, yh_test, ya_train, ya_test = train_test_split(\n",
+    "    X_scaled, y_health, y_anthro, test_size=0.2, random_state=42\n",
+    ")\n",
+    "\n",
+    "print(\"Training models...\")\n",
+    "clf_health.fit(X_train, yh_train)\n",
+    "clf_anthro.fit(X_train, ya_train)\n",
+    "print(\"Done!\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 4. Evaluation"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": None,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def evaluate_model(clf, X_test, y_test, name):\n",
+    "    preds = clf.predict(X_test)\n",
+    "    acc = accuracy_score(y_test, preds)\n",
+    "    print(f\"--- {name} Results ---\")\n",
+    "    print(f\"Accuracy: {acc:.2%}\")\n",
+    "    print(\"\\nClassification Report:\")\n",
+    "    print(classification_report(y_test, preds))\n",
+    "    \n",
+    "    plt.figure(figsize=(6,4))\n",
+    "    sns.heatmap(confusion_matrix(y_test, preds), annot=True, fmt='d', cmap='Blues')\n",
+    "    plt.title(f'{name} Confusion Matrix')\n",
+    "    plt.ylabel('True Label')\n",
+    "    plt.xlabel('Predicted Label')\n",
+    "    plt.show()\n",
+    "\n",
+    "evaluate_model(clf_health, X_test, yh_test, \"Reef Health\")\n",
+    "evaluate_model(clf_anthro, X_test, ya_test, \"Anthrophony\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 5. Save Model\n",
+    "Save the trained models to be used in the dashboard."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": None,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "joblib.dump(clf_health, os.path.join(OUTPUT_DIR, \"health_classifier.pkl\"))\n",
+    "joblib.dump(clf_anthro, os.path.join(OUTPUT_DIR, \"anthro_classifier.pkl\"))\n",
+    "joblib.dump(scaler, os.path.join(OUTPUT_DIR, \"scaler.pkl\"))\n",
+    "\n",
+    "print(f\"Models saved to {OUTPUT_DIR}\")\n",
+    "print(\"You can now download these files and place them in your 'models/classifiers' directory locally.\")"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.10.12"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
+
+with open('notebooks/kaggle_surfperch_training.ipynb', 'w') as f:
+    json.dump(notebook_content, f, indent=1)
+
+print("Notebook generated successfully: notebooks/kaggle_surfperch_training.ipynb")
