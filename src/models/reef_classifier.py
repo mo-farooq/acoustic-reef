@@ -106,6 +106,14 @@ class ReefClassifier:
             Dictionary with training results
         """
         try:
+            if embeddings is None or len(embeddings) == 0:
+                raise ValueError("Embeddings array is empty; provide training data before calling train().")
+            if len(health_labels) != len(embeddings) or len(anthro_labels) != len(embeddings):
+                raise ValueError(
+                    "Label lengths do not match embeddings length: "
+                    f"embeddings={len(embeddings)}, health_labels={len(health_labels)}, "
+                    f"anthro_labels={len(anthro_labels)}"
+                )
             logger.info(f"Training {self.model_type} classifier on {len(embeddings)} samples")
             
             # Split data
