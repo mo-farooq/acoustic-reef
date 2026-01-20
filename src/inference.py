@@ -80,7 +80,14 @@ def get_surfperch_model() -> SurfPerchModel:
 
 
 def load_precomputed_embeddings() -> Tuple[np.ndarray, pd.DataFrame]:
-    return load_embeddings_from_csv()
+    try:
+        X, df = load_embeddings_from_csv()
+        if X.size == 0:
+            raise ValueError("Embeddings CSV contains no numeric feature columns.")
+        return X, df
+    except Exception as e:
+        logger.error(f"Failed to load precomputed embeddings: {e}")
+        raise
 
 
 def find_embedding_for_filename(emb_df: pd.DataFrame, filename: str) -> Optional[np.ndarray]:
