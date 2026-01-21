@@ -37,6 +37,8 @@ def generate_umap_visualization() -> Tuple[Optional[np.ndarray], Optional[umap.U
         
         # Load embeddings directly
         X_emb, emb_df = load_embeddings_from_csv()
+        if X_emb.size == 0:
+            raise ValueError("Embeddings are empty; cannot compute UMAP.")
         logger.info(f"Loaded {X_emb.shape[0]} samples with {X_emb.shape[1]} features")
         
         # Use actual category labels from embeddings data
@@ -126,6 +128,8 @@ def generate_umap_visualization_3d() -> Tuple[Optional[np.ndarray], Optional[uma
     try:
         logger.info("Loading embeddings for 3D UMAP...")
         X_emb, emb_df = load_embeddings_from_csv()
+        if X_emb.size == 0:
+            raise ValueError("Embeddings are empty; cannot compute 3D UMAP.")
         logger.info(f"Loaded {X_emb.shape[0]} samples with {X_emb.shape[1]} features (3D)")
         labels = []
         filenames = []
