@@ -25,6 +25,14 @@ def identify_acoustic_clusters(df: pd.DataFrame, method: str = 'kmeans', n_clust
     Returns:
         Tuple of (cluster_labels, cluster_info)
     """
+    required_cols = {"x", "y", "label"}
+    missing = required_cols.difference(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns for clustering: {sorted(missing)}")
+    if df.empty:
+        logger.warning("Empty dataframe provided; no clusters to identify.")
+        return np.array([]), {}
+
     coords = df[['x', 'y']].values
     
     if method == 'kmeans':
