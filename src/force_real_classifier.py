@@ -205,9 +205,20 @@ def create_fallback_classifier():
     
     return FallbackClassifier()
 
+
+def _normalize_feature_vals(feature_vals: np.ndarray) -> np.ndarray:
+    if feature_vals is None or feature_vals.size == 0:
+        raise ValueError("feature_vals is empty; cannot run prediction.")
+    if feature_vals.ndim == 1:
+        return feature_vals.reshape(1, -1)
+    if feature_vals.ndim != 2:
+        raise ValueError(f"feature_vals must be 2D, got shape {feature_vals.shape}")
+    return feature_vals
+
 def predict_with_force_classifier(feature_vals: np.ndarray) -> ForcePredictionResult:
     """Force the real classifier to work"""
     try:
+        feature_vals = _normalize_feature_vals(feature_vals)
         logger.info(f"Force classifier processing features: {feature_vals.shape}")
         
         # Force load the model
