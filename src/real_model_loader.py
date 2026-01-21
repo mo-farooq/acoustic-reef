@@ -172,9 +172,20 @@ def force_load_real_model():
         logger.error(f"❌ REAL MODEL LOADING FAILED: {e}")
         raise
 
+
+def _normalize_feature_vals(feature_vals: np.ndarray) -> np.ndarray:
+    if feature_vals is None or feature_vals.size == 0:
+        raise ValueError("feature_vals is empty; cannot run prediction.")
+    if feature_vals.ndim == 1:
+        return feature_vals.reshape(1, -1)
+    if feature_vals.ndim != 2:
+        raise ValueError(f"feature_vals must be 2D, got shape {feature_vals.shape}")
+    return feature_vals
+
 def predict_with_real_model(feature_vals: np.ndarray) -> RealPredictionResult:
     """Use the REAL trained model to make predictions"""
     try:
+        feature_vals = _normalize_feature_vals(feature_vals)
         logger.info(f"🎯 USING REAL MODEL for features: {feature_vals.shape}")
         
         # Force load the real model
