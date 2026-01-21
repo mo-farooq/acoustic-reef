@@ -27,17 +27,26 @@ OUTPUT_DIR = Path("processed/degraded/")
 # Duration of each clip in seconds
 CLIP_DURATION_SEC = 5.0
 
+# Prefix for output filenames
+CLIP_PREFIX = f"{INPUT_AUDIO.stem}_clip"
+
 
 def ensure_directory(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def write_clip(audio_segment: np.ndarray, sample_rate: int, index: int, out_dir: Path) -> None:
+def write_clip(
+    audio_segment: np.ndarray,
+    sample_rate: int,
+    index: int,
+    out_dir: Path,
+    prefix: str,
+) -> None:
     """Write a single audio clip to disk with a sequential filename.
 
-    Filenames are of the form: degraded_clip_001.wav, degraded_clip_002.wav, ...
+    Filenames are of the form: <prefix>_001.wav, <prefix>_002.wav, ...
     """
-    filename = f"degraded_clip_{index:03d}.wav"
+    filename = f"{prefix}_{index:03d}.wav"
     out_path = out_dir / filename
 
     # soundfile expects shape (n_samples,) for mono or (n_samples, n_channels) for multi-channel
@@ -86,7 +95,7 @@ def main() -> None:
         start = i * samples_per_clip
         end = start + samples_per_clip
         segment = audio[:, start:end]  # shape (n_channels, samples_per_clip)
-        write_clip(segment, sr, i + 1, OUTPUT_DIR)
+        write_clip(segment, sr, i + 1, OUTPUT_DIR, CLIP_PREFIX)
 
     print("Done.")
 
