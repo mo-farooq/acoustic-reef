@@ -92,6 +92,12 @@ To contribute to this project:
 
 ---
 
+## 📦 Data Artifacts
+- Precomputed embeddings: `data/embeddings/embeddings.csv`
+- UMAP coordinates: `data/processed/umap_coordinates.csv`
+
+---
+
 ## 🔬 Technical Approach
 1. **Foundation Model**: Use pre-trained Google SurfPerch model from Kaggle
 2. **Embeddings**: Generate audio embeddings using TensorFlow saved_model format
