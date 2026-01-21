@@ -81,6 +81,11 @@ DASHBOARD_SETTINGS: Dict[str, Union[str, int, List[str]]] = {
     "supported_formats": [".wav", ".mp3", ".flac"]
 }
 
+
+def get_supported_audio_formats() -> List[str]:
+    """Return the list of supported audio file extensions."""
+    return list(DASHBOARD_SETTINGS["supported_formats"])
+
 # Logging settings
 LOGGING_SETTINGS: Dict[str, Union[str, Path]] = {
     "level": "INFO",
