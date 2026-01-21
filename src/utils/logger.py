@@ -67,6 +67,10 @@ class AcousticReefLogger:
         """Log debug message with optional context"""
         self.logger.debug(self._format_message(message, **kwargs))
     
+    def exception(self, message: str, **kwargs):
+        """Log exception with traceback and optional context"""
+        self.logger.exception(self._format_message(message, **kwargs))
+
     def get_log_file_path(self) -> Optional[Path]:
         """Get the path to the current log file"""
         for handler in self.logger.handlers:
