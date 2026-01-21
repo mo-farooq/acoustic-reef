@@ -25,6 +25,13 @@ def predict_with_mock_classifier(feature_vals: np.ndarray) -> MockPredictionResu
     This works around the scikit-learn version issues
     """
     try:
+        if feature_vals is None or feature_vals.size == 0:
+            raise ValueError("feature_vals is empty; cannot make prediction.")
+        if feature_vals.ndim == 1:
+            feature_vals = feature_vals.reshape(1, -1)
+        if feature_vals.ndim != 2:
+            raise ValueError(f"feature_vals must be 2D, got shape {feature_vals.shape}")
+
         logger.info(f"Mock classifier processing features: {feature_vals.shape}")
         
         # Extract some basic statistics from the embedding
