@@ -7,7 +7,7 @@ import joblib
 import numpy as np
 import logging
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Any
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ class SimplePredictionResult:
     feature_source: str
     feature_dim: int
 
-def load_model_directly() -> any:
+def load_model_directly() -> Any:
     """Load the RandomForest model directly without caching"""
     try:
         # Use resolved RF model path from config
@@ -51,6 +51,13 @@ def load_model_directly() -> any:
 def predict_simple(feature_vals: np.ndarray) -> SimplePredictionResult:
     """Make predictions using the loaded model"""
     try:
+        if feature_vals is None or feature_vals.size == 0:
+            raise ValueError("feature_vals is empty; cannot make prediction.")
+        if feature_vals.ndim == 1:
+            feature_vals = feature_vals.reshape(1, -1)
+        if feature_vals.ndim != 2:
+            raise ValueError(f"feature_vals must be 2D, got shape {feature_vals.shape}")
+
         # Load model fresh each time
         model = load_model_directly()
         
