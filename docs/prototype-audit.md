@@ -44,10 +44,11 @@ Remove the synthetic-data-to-training path from any research notebook. If a demo
 **Evidence inspected**
 - `src/models/reef_classifier.py`: `train()` uses a random `train_test_split` and ordinary five-fold `cross_val_score`.
 - `src/models/train_classifier.py`: the training path calls this method and passes no site, recorder, deployment or time grouping metadata.
-- The generated Kaggle notebook also uses a random row-level split.
+- The generated Kaggle notebook also uses a random row-level split and fits `StandardScaler` on the full feature matrix before the train/test split.
+- In `ReefClassifier.train()`, the scaler is fitted on the complete outer training partition before five-fold CV is run on the transformed matrix, so each CV validation fold contributes to the scaler fit.
 
 **Risk**  
-Adjacent clips or recordings from the same site/deployment can occur on both sides of a random split. This does not estimate generalisation to unseen sites, recorders or recording periods.
+Adjacent clips or recordings from the same site/deployment can occur on both sides of a random split. This does not estimate generalisation to unseen sites, recorders or recording periods. Fitting the scaler before the notebook split exposes test-set distribution information; fitting it once before cross-validation exposes each CV fold to preprocessing statistics calculated using that fold.
 
 **Recommendation**  
 Do not reuse these prototype scores for the research paper. Build a separate research evaluation pipeline with explicit groups and frozen split manifests only after E1 data-integrity questions and supervisor decisions are resolved. Keep site as the inferential unit; clips are not independent site replicates.
