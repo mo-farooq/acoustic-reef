@@ -52,7 +52,6 @@ from src.models.surfperch_integration import SurfPerchModel
 from src.utils.config import SURFPERCH_SETTINGS, EMBEDDINGS_CSV, MASTER_DATASET_CSV, RF_MODEL_PATH, CLASSIFIER_MODEL_DIR
 from src.inference import (
     resolve_features_for_file,
-    predict_vital_signs,
     load_umap_coordinates,
     transform_with_umap,
 )
@@ -63,10 +62,15 @@ from src.utils.acoustic_map_enhancements import (
     create_trajectory_plot,
     generate_acoustic_insights
 )
-from src.simple_inference import predict_simple
-from src.mock_classifier import predict_with_mock_classifier
-from src.force_real_classifier import predict_with_force_classifier
 from src.real_model_loader import predict_with_real_model
+from src.dashboard_inference import (
+    DEMO_LABEL,
+    run_genuine_inference,
+    health_chart_color,
+    summarize_batch_health,
+    method_banner,
+    present_outcome,
+)
 
 # Caching functions for performance optimization
 @st.cache_data
@@ -335,14 +339,14 @@ def show_landing_page():
         4. **Get results** - Instant health assessment
         """)
         
-        st.markdown("### 📊 Sample Results")
-        
-        # Mock results for demonstration
+        st.markdown("### 📊 Sample Results (DEMO)")
+        st.warning(f"**{DEMO_LABEL}.** These numbers are hard-coded placeholders for layout purposes only. "
+                   "They were not produced by any model or recording.")
         col_a, col_b = st.columns(2)
         with col_a:
-            st.metric("Health Status", "Healthy", "85% confidence")
+            st.metric("DEMO Health Status", "Healthy", "example only")
         with col_b:
-            st.metric("Anthrophony", "Low", "12% detected")
+            st.metric("DEMO Anthrophony", "Low", "example only")
         
         st.markdown("### 🎧 Audio Quality Tips")
         st.markdown("""
@@ -646,48 +650,31 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
             try:
                 feature_vals, source = resolve_features_for_file(file_basename, audio_np, sr)
             except Exception as e:
-                st.error("Analysis failed while preparing features. Please try a different audio file.")
+                st.error(
+                    "No result: the embedding for this recording could not be prepared "
+                    f"({type(e).__name__}: {e}). No prediction was made."
+                )
                 return
 
             st.success(f"Using {source}; features shape: {feature_vals.shape}")
 
-            # Predict vital signs (health + noise) with simplified fallback system
-            result = None
-            model_source = "Unknown"
-            model_warning = None
-            
-            # Primary: Try REAL trained model with robust error handling
-            try:
-                # Check if model file exists before attempting to load
-                from src.utils.config import RF_MODEL_PATH
-                if os.path.exists(RF_MODEL_PATH):
-                    result = predict_with_real_model(feature_vals)
-                    model_source = "Real Trained Model"
-                    st.success("✅ Using trained AI model - highest accuracy")
-                else:
-                    raise FileNotFoundError("Trained model file not found")
-            except Exception as e_real:
-                # Fallback: Mock classifier with clear explanation
-                try:
-                    result = predict_with_mock_classifier(feature_vals)
-                    model_source = "Heuristic Analysis"
-                    model_warning = "⚠️ Using heuristic analysis due to missing trained model. Results are estimates based on audio characteristics."
-                    st.warning(model_warning)
-                except Exception as e_mock:
-                    st.error("❌ Analysis failed. Please check your audio file and try again.")
-                    st.error(f"Technical details: {str(e_mock)}")
-                    return
+            # Predict with the stored trained classifier. There is no fallback model:
+            # if it cannot be used, an unavailable/error state is shown instead.
+            outcome = run_genuine_inference(feature_vals, embedding_source=source)
+            banner = method_banner(outcome)
+            view = present_outcome(outcome)
 
-            # Vital Signs UI with native Streamlit
             st.header("🩺 Reef Vital Signs")
-            
-            # Model source indicator using native Streamlit
-            if model_warning:
-                st.info(f"**📊 Analysis Method:** {model_source}")
-            else:
-                st.success(f"**✅ Analysis Method:** {model_source}")
-            
-            # Helper function for confidence interpretation
+            if view is None:
+                st.error(f"**❌ Model unavailable / inference failed**\n\n{banner['text']}")
+                return
+            st.success(f"**✅ Analysis Method:** {banner['text']}")
+            result = outcome.result
+
+            def _box(style, text):
+                {"success": st.success, "error": st.error}.get(style, st.info)(text)
+
+            # Helper function for score interpretation (uncalibrated vote share)
             def get_confidence_level(conf):
                 if conf is None:
                     return "Unknown", "❓"
@@ -697,49 +684,40 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                     return "Medium", "🟡"
                 else:
                     return "Low", "🔴"
-            
+
             col1, col2 = st.columns(2, gap="large")
-            
+
             with col1:
-                # Health status using native containers
-                health_icon = "🌿" if result.health_label == "Healthy" else "⚠️"
-                
                 with st.container():
-                    if result.health_label == "Healthy":
-                        st.success("**🏥 Reef Health Status**")
-                    else:
-                        st.error("**🏥 Reef Health Status**")
-                    
-                    st.markdown(f"# {health_icon} {result.health_label}")
-                    
+                    _box(view["health_style"], "**🏥 Reef Health Status**")
+                    st.markdown(f"# {view['health_label']}")
+                    if view["health_label"] == "Not Assessed":
+                        st.caption(
+                            f"The model's output for this clip is '{view['predicted_class']}', "
+                            "which does not support a reef-health assessment."
+                        )
                 if result.health_conf is not None:
                     conf_level, conf_icon = get_confidence_level(result.health_conf)
                     st.metric(
-                        "Confidence Level", 
-                        f"{result.health_conf:.0%}",
+                        "Model score (uncalibrated)",
+                        view["health_score"],
                         delta=f"{conf_level}",
-                        help=f"{conf_icon} {conf_level} confidence"
+                        help=f"{conf_icon} {conf_level}. {view['note']}"
                     )
-            
+
             with col2:
-                # Noise pollution using native containers
-                noise_icon = "🔊" if result.noise_label == "High" else "🔇"
-                
                 with st.container():
-                    if result.noise_label == "High":
-                        st.error("**🔊 Noise Pollution Level**")
-                    else:
-                        st.success("**🔊 Noise Pollution Level**")
-                    
-                    st.markdown(f"# {noise_icon} {result.noise_label}")
-                    
+                    _box(view["noise_style"], "**🔊 Anthrophony (human-made noise) predicted**")
+                    st.markdown(f"# {view['noise_label']}")
+                    if view["noise_label"] == "Low":
+                        st.caption("Low = the model did not predict anthrophony for this clip.")
                 if result.noise_conf is not None:
                     conf_level, conf_icon = get_confidence_level(result.noise_conf)
                     st.metric(
-                        "Confidence Level",
-                        f"{result.noise_conf:.0%}",
+                        "Model score (uncalibrated)",
+                        view["noise_score"],
                         delta=f"{conf_level}",
-                        help=f"{conf_icon} {conf_level} confidence"
+                        help=f"{conf_icon} {conf_level}. {view['note']}"
                     )
 
             # Environmental Context based on coordinates/date
@@ -946,7 +924,7 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                     # Update layout for clarity
                     fig.update_layout(
                         title=dict(
-                            text="🎯 AI Confidence Breakdown",
+                            text="🎯 Model class-vote shares (uncalibrated)",
                             font=dict(size=16, color='#2c3e50'),
                             x=0.5,
                             xanchor='center'
@@ -957,7 +935,7 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                         paper_bgcolor='rgba(255,255,255,0.9)',
                         font=dict(family='Arial, sans-serif', size=12),
                         xaxis=dict(title="Prediction Categories"),
-                        yaxis=dict(title="Confidence Level", range=[0, 1])
+                        yaxis=dict(title="Vote share (not a calibrated probability)", range=[0, 1])
                     )
                     
                     st.plotly_chart(fig, use_container_width=True)
@@ -1024,7 +1002,7 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
 
             # Confidence explanation
             with st.expander("What does confidence mean?"):
-                st.write("Confidence reflects the model's estimated probability for the predicted class based on SurfPerch embeddings. Recording length, background noise, and signal quality can affect confidence.")
+                st.write("The score is the share of random-forest trees voting for a class, computed from the embedding. It is not a calibrated probability and has not been validated against independent recordings.")
 
         # Enhanced Take Action section with context-aware recommendations
         if result.health_label in ("Degraded", "Stressed") or result.noise_label == "High":
@@ -1102,7 +1080,10 @@ def analyze_audio(uploaded_file, sample_rate, duration_limit):
                     
                 elif not health_degraded and noise_high:
                     # Noise issue without health problems - preventive action
-                    st.info("🔊 **NOISE CONCERN**: High noise detected on healthy reef")
+                    if result.health_label == "Healthy":
+                        st.info("🔊 **NOISE CONCERN**: High noise detected on healthy reef")
+                    else:
+                        st.info("🔊 **NOISE CONCERN**: Anthrophony predicted; reef health was not assessed for this clip")
                     st.markdown("""
                     **Preventive Actions:**
                     - **Monitor noise impact** on reef ecosystem
@@ -1237,7 +1218,7 @@ def show_batch_predictions():
             else:
                 import pandas as pd
                 dataset_df = pd.read_csv(uploaded_dataset)
-            X, y, merged = align_embeddings_and_labels(emb_df, dataset_df)
+            X, y, merged = align_embeddings_and_labels(emb_df, dataset_df, key_columns=['filepath'])
             model = load_trained_rf_model()
             preds, probs = predict_with_model(model, X)
 
@@ -1324,6 +1305,7 @@ def run_batch_upload(batch_files):
     rows = []
     healthy_count = 0
     degraded_count = 0
+    not_assessed_count = 0
     error_count = 0
     user_embeddings = []
     user_coordinates = []
@@ -1371,19 +1353,21 @@ def run_batch_upload(batch_files):
             result = predict_with_real_model(feature_vals)
             status = 'success'
             health = result.health_label
-            conf = result.health_conf if result.health_conf is not None else 0.0
+            conf_text = f"{result.health_conf:.0%}" if result.health_conf is not None else "—"
             
             # Store prediction results
             user_labels.append(health)
             
             if health == 'Healthy':
                 healthy_count += 1
-            else:
+            elif health == 'Degraded':
                 degraded_count += 1
+            else:
+                not_assessed_count += 1  # e.g. anthrophony: reef health not assessed
             rows.append({
                 'filename': f.name,
                 'health': health,
-                'confidence': f"{conf:.0%}",
+                'confidence': conf_text,
                 'noise': result.noise_label,
                 'status': status,
             })
@@ -1419,11 +1403,14 @@ def run_batch_upload(batch_files):
         pct_healthy = healthy_count / total
         pct_degraded = degraded_count / total
         st.markdown("### 📊 Summary Statistics")
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Total Files", f"{total}")
         c2.metric("Healthy", f"{healthy_count} ({pct_healthy:.0%})")
         c3.metric("Degraded", f"{degraded_count} ({pct_degraded:.0%})")
-        c4.metric("Errors", f"{error_count}")
+        c4.metric("Not assessed", f"{not_assessed_count}")
+        c5.metric("Errors", f"{error_count}")
+        st.caption("Scores are uncalibrated random-forest vote shares. 'Not assessed' = the model output "
+                   "(anthrophony) does not support a reef-health assessment.")
 
     # Enhanced 3D UMAP Visualization with Diagnostics
     if len(user_embeddings) > 0:
@@ -1521,7 +1508,8 @@ def run_batch_upload(batch_files):
                 color_map = {
                     'Healthy': '#10b981',  # Green
                     'Degraded': '#ef4444',  # Red
-                    'Stressed': '#f59e0b'   # Orange
+                    'Stressed': '#f59e0b',  # Orange
+                    'Not Assessed': '#9ca3af'  # Grey
                 }
                 user_df_3d['color'] = user_df_3d['health_status'].map(color_map)
                 
@@ -1704,9 +1692,16 @@ def run_batch_upload(batch_files):
                 
                 with col3:
                     # Health consistency with clear explanation
-                    health_counts = user_df_3d['health_status'].value_counts()
-                    dominant_health = health_counts.index[0]
-                    dominant_pct = (health_counts.iloc[0] / len(user_df_3d)) * 100
+                    # Dominant health is computed over assessed clips only;
+                    # Not Assessed (e.g. anthrophony) is never treated as degraded.
+                    _assessed_df = user_df_3d[user_df_3d['health_status'] != 'Not Assessed']
+                    health_counts = _assessed_df['health_status'].value_counts()
+                    if len(_assessed_df) > 0:
+                        dominant_health = health_counts.index[0]
+                        dominant_pct = (health_counts.iloc[0] / len(_assessed_df)) * 100
+                    else:
+                        dominant_health = "Not Assessed"
+                        dominant_pct = 0.0
                     
                     if dominant_pct >= 80:
                         consistency_emoji = "✅"
@@ -1741,7 +1736,7 @@ def run_batch_upload(batch_files):
                         go.Bar(
                             x=health_dist.index,
                             y=health_dist.values,
-                            marker_color=['#10b981' if h == 'Healthy' else '#ef4444' for h in health_dist.index],
+                            marker_color=[health_chart_color(h) for h in health_dist.index],
                             text=[f"{v} files" for v in health_dist.values],
                             textposition='auto',
                             textfont=dict(size=14, color='white')
@@ -1762,14 +1757,18 @@ def run_batch_upload(batch_files):
                         percentage = (count / len(user_df_3d)) * 100
                         if health == 'Healthy':
                             st.success(f"🟢 **{count}** {health}\n\n({percentage:.0f}% of total)")
+                        elif health == 'Not Assessed':
+                            st.info(f"⚪ **{count}** {health}\n\n({percentage:.0f}% of total)")
                         else:
                             st.error(f"🔴 **{count}** {health}\n\n({percentage:.0f}% of total)")
                     
                     # Add simple interpretation
                     st.caption("---")
-                    if health_dist.index[0] == 'Healthy' and (health_dist.iloc[0] / len(user_df_3d)) >= 0.7:
-                        st.success("**Good news!** Most recordings show a healthy reef.")
-                    elif health_dist.index[0] == 'Degraded' and (health_dist.iloc[0] / len(user_df_3d)) >= 0.7:
+                    if dominant_health == 'Not Assessed':
+                        st.info("**Reef health not assessed** for these recordings (e.g. anthrophony predicted). No health conclusion is drawn.")
+                    elif dominant_health == 'Healthy' and dominant_pct >= 70:
+                        st.success("**Good news!** Most assessed recordings show a healthy reef.")
+                    elif dominant_health == 'Degraded' and dominant_pct >= 70:
                         st.error("**Attention needed!** Most recordings show reef stress.")
                     else:
                         st.info("**Mixed results.** Some areas healthy, some need attention.")
@@ -1816,7 +1815,9 @@ def run_batch_upload(batch_files):
                 
                 # Insight 2: Health patterns
                 with insight_cols[1]:
-                    if dominant_pct >= 90:
+                    if dominant_health == "Not Assessed":
+                        st.info("**⚪ Reef Health Not Assessed**\n\nNone of your recordings received a reef-health assessment (for example, anthrophony was predicted). No health conclusion is drawn.")
+                    elif dominant_pct >= 90:
                         if dominant_health == "Healthy":
                             st.success(f"""
                             **✅ Excellent News!**
@@ -1861,7 +1862,9 @@ def run_batch_upload(batch_files):
                 st.caption("Simple, actionable steps based on your results:")
                 
                 # Priority recommendation based on dominant health
-                if dominant_health == "Degraded" and dominant_pct > 50:
+                if dominant_health == "Not Assessed":
+                    st.info("### ⚪ Reef health not assessed\n\nNo recording received a reef-health assessment, so no health-based recommendation is given.")
+                elif dominant_health == "Degraded" and dominant_pct > 50:
                     st.error("""
                     ### 🚨 HIGH PRIORITY: Your Reef Needs Help
                     
@@ -2024,14 +2027,26 @@ def run_batch_upload(batch_files):
     
     with summary_col1:
         # Overall assessment
-        if total > 0:
-            healthy_ratio = healthy_count / total
+        _batch_summary = summarize_batch_health(healthy_count, degraded_count, not_assessed_count)
+        if total > 0 and _batch_summary["tone"] == "not_assessed":
+            st.info(f"""
+            ### ⚪ Reef Health Not Assessed
+            
+            Reef health was not assessed for any of the **{total}** recordings 
+            (for example, anthrophony was predicted). No health conclusion is drawn.
+            """)
+        elif total > 0:
+            healthy_ratio = _batch_summary["healthy_ratio"]
+            assessed_total = _batch_summary["assessed"]
+            
+            if not_assessed_count > 0:
+                st.caption(f"Ratios use the {assessed_total} assessed recordings; {not_assessed_count} not assessed (e.g. anthrophony) are excluded and are not counted as degraded.")
             
             if healthy_ratio >= 0.8:
                 st.success(f"""
                 ### 🌟 Excellent Overall Health
                 
-                **{healthy_count} out of {total} recordings** ({healthy_ratio:.0%}) show healthy reef conditions.
+                **{healthy_count} out of {assessed_total} assessed recordings** ({healthy_ratio:.0%}) show healthy reef conditions.
                 
                 **What this means:**
                 Your reef is in great shape! The marine ecosystem is thriving with diverse sounds 
@@ -2043,7 +2058,7 @@ def run_batch_upload(batch_files):
                 st.info(f"""
                 ### ⚖️ Mixed Health Status
                 
-                **{healthy_count} out of {total} recordings** ({healthy_ratio:.0%}) show healthy conditions, 
+                **{healthy_count} out of {assessed_total} assessed recordings** ({healthy_ratio:.0%}) show healthy conditions, 
                 while **{degraded_count}** show signs of stress.
                 
                 **What this means:**
@@ -2056,7 +2071,7 @@ def run_batch_upload(batch_files):
                 st.error(f"""
                 ### 🚨 Reef Health Concern
                 
-                **Only {healthy_count} out of {total} recordings** ({healthy_ratio:.0%}) show healthy conditions.
+                **Only {healthy_count} out of {assessed_total} assessed recordings** ({healthy_ratio:.0%}) show healthy conditions.
                 **{degraded_count} recordings** indicate reef stress.
                 
                 **What this means:**
