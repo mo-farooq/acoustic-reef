@@ -66,6 +66,8 @@ from src.real_model_loader import predict_with_real_model
 from src.dashboard_inference import (
     DEMO_LABEL,
     run_genuine_inference,
+    health_chart_color,
+    summarize_batch_health,
     method_banner,
     present_outcome,
 )
@@ -1690,9 +1692,16 @@ def run_batch_upload(batch_files):
                 
                 with col3:
                     # Health consistency with clear explanation
-                    health_counts = user_df_3d['health_status'].value_counts()
-                    dominant_health = health_counts.index[0]
-                    dominant_pct = (health_counts.iloc[0] / len(user_df_3d)) * 100
+                    # Dominant health is computed over assessed clips only;
+                    # Not Assessed (e.g. anthrophony) is never treated as degraded.
+                    _assessed_df = user_df_3d[user_df_3d['health_status'] != 'Not Assessed']
+                    health_counts = _assessed_df['health_status'].value_counts()
+                    if len(_assessed_df) > 0:
+                        dominant_health = health_counts.index[0]
+                        dominant_pct = (health_counts.iloc[0] / len(_assessed_df)) * 100
+                    else:
+                        dominant_health = "Not Assessed"
+                        dominant_pct = 0.0
                     
                     if dominant_pct >= 80:
                         consistency_emoji = "✅"
@@ -1727,7 +1736,7 @@ def run_batch_upload(batch_files):
                         go.Bar(
                             x=health_dist.index,
                             y=health_dist.values,
-                            marker_color=['#10b981' if h == 'Healthy' else '#ef4444' for h in health_dist.index],
+                            marker_color=[health_chart_color(h) for h in health_dist.index],
                             text=[f"{v} files" for v in health_dist.values],
                             textposition='auto',
                             textfont=dict(size=14, color='white')
@@ -1748,14 +1757,18 @@ def run_batch_upload(batch_files):
                         percentage = (count / len(user_df_3d)) * 100
                         if health == 'Healthy':
                             st.success(f"🟢 **{count}** {health}\n\n({percentage:.0f}% of total)")
+                        elif health == 'Not Assessed':
+                            st.info(f"⚪ **{count}** {health}\n\n({percentage:.0f}% of total)")
                         else:
                             st.error(f"🔴 **{count}** {health}\n\n({percentage:.0f}% of total)")
                     
                     # Add simple interpretation
                     st.caption("---")
-                    if health_dist.index[0] == 'Healthy' and (health_dist.iloc[0] / len(user_df_3d)) >= 0.7:
-                        st.success("**Good news!** Most recordings show a healthy reef.")
-                    elif health_dist.index[0] == 'Degraded' and (health_dist.iloc[0] / len(user_df_3d)) >= 0.7:
+                    if dominant_health == 'Not Assessed':
+                        st.info("**Reef health not assessed** for these recordings (e.g. anthrophony predicted). No health conclusion is drawn.")
+                    elif dominant_health == 'Healthy' and dominant_pct >= 70:
+                        st.success("**Good news!** Most assessed recordings show a healthy reef.")
+                    elif dominant_health == 'Degraded' and dominant_pct >= 70:
                         st.error("**Attention needed!** Most recordings show reef stress.")
                     else:
                         st.info("**Mixed results.** Some areas healthy, some need attention.")
@@ -1802,7 +1815,9 @@ def run_batch_upload(batch_files):
                 
                 # Insight 2: Health patterns
                 with insight_cols[1]:
-                    if dominant_pct >= 90:
+                    if dominant_health == "Not Assessed":
+                        st.info("**⚪ Reef Health Not Assessed**\n\nNone of your recordings received a reef-health assessment (for example, anthrophony was predicted). No health conclusion is drawn.")
+                    elif dominant_pct >= 90:
                         if dominant_health == "Healthy":
                             st.success(f"""
                             **✅ Excellent News!**
@@ -1847,7 +1862,9 @@ def run_batch_upload(batch_files):
                 st.caption("Simple, actionable steps based on your results:")
                 
                 # Priority recommendation based on dominant health
-                if dominant_health == "Degraded" and dominant_pct > 50:
+                if dominant_health == "Not Assessed":
+                    st.info("### ⚪ Reef health not assessed\n\nNo recording received a reef-health assessment, so no health-based recommendation is given.")
+                elif dominant_health == "Degraded" and dominant_pct > 50:
                     st.error("""
                     ### 🚨 HIGH PRIORITY: Your Reef Needs Help
                     
@@ -2010,14 +2027,26 @@ def run_batch_upload(batch_files):
     
     with summary_col1:
         # Overall assessment
-        if total > 0:
-            healthy_ratio = healthy_count / total
+        _batch_summary = summarize_batch_health(healthy_count, degraded_count, not_assessed_count)
+        if total > 0 and _batch_summary["tone"] == "not_assessed":
+            st.info(f"""
+            ### ⚪ Reef Health Not Assessed
+            
+            Reef health was not assessed for any of the **{total}** recordings 
+            (for example, anthrophony was predicted). No health conclusion is drawn.
+            """)
+        elif total > 0:
+            healthy_ratio = _batch_summary["healthy_ratio"]
+            assessed_total = _batch_summary["assessed"]
+            
+            if not_assessed_count > 0:
+                st.caption(f"Ratios use the {assessed_total} assessed recordings; {not_assessed_count} not assessed (e.g. anthrophony) are excluded and are not counted as degraded.")
             
             if healthy_ratio >= 0.8:
                 st.success(f"""
                 ### 🌟 Excellent Overall Health
                 
-                **{healthy_count} out of {total} recordings** ({healthy_ratio:.0%}) show healthy reef conditions.
+                **{healthy_count} out of {assessed_total} assessed recordings** ({healthy_ratio:.0%}) show healthy reef conditions.
                 
                 **What this means:**
                 Your reef is in great shape! The marine ecosystem is thriving with diverse sounds 
@@ -2029,7 +2058,7 @@ def run_batch_upload(batch_files):
                 st.info(f"""
                 ### ⚖️ Mixed Health Status
                 
-                **{healthy_count} out of {total} recordings** ({healthy_ratio:.0%}) show healthy conditions, 
+                **{healthy_count} out of {assessed_total} assessed recordings** ({healthy_ratio:.0%}) show healthy conditions, 
                 while **{degraded_count}** show signs of stress.
                 
                 **What this means:**
@@ -2042,7 +2071,7 @@ def run_batch_upload(batch_files):
                 st.error(f"""
                 ### 🚨 Reef Health Concern
                 
-                **Only {healthy_count} out of {total} recordings** ({healthy_ratio:.0%}) show healthy conditions.
+                **Only {healthy_count} out of {assessed_total} assessed recordings** ({healthy_ratio:.0%}) show healthy conditions.
                 **{degraded_count} recordings** indicate reef stress.
                 
                 **What this means:**

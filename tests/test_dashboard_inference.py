@@ -84,3 +84,24 @@ def test_real_inference_never_uses_random(monkeypatch):
     out1 = di.run_genuine_inference(np.zeros((1, 3)), predictor=lambda f: _result("degraded"))
     out2 = di.run_genuine_inference(np.zeros((1, 3)), predictor=lambda f: _result("degraded"))
     assert out1.result == out2.result
+
+
+def test_batch_summary_excludes_not_assessed_from_ratio():
+    s = di.summarize_batch_health(healthy=1, degraded=0, not_assessed=9)
+    assert s["assessed"] == 1 and s["healthy_ratio"] == 1.0 and s["tone"] == "good"
+
+
+def test_batch_summary_all_not_assessed_is_neutral_not_concern():
+    s = di.summarize_batch_health(healthy=0, degraded=0, not_assessed=5)
+    assert s["tone"] == "not_assessed" and s["healthy_ratio"] is None
+
+
+def test_batch_summary_concern_requires_degraded_clips():
+    assert di.summarize_batch_health(1, 3, 0)["tone"] == "concern"
+    assert di.summarize_batch_health(0, 0, 20)["tone"] != "concern"
+
+
+def test_not_assessed_chart_colour_is_neutral():
+    assert di.health_chart_color("Not Assessed") == "#9ca3af"
+    assert di.health_chart_color("Degraded") == "#ef4444"
+    assert di.health_chart_color("Healthy") == "#10b981"

@@ -119,3 +119,31 @@ def present_outcome(outcome: InferenceOutcome) -> Optional[Dict[str, Optional[st
         "predicted_class": r.predicted_class,
         "note": CONFIDENCE_NOTE,
     }
+
+
+NOT_ASSESSED = "Not Assessed"
+
+
+def health_chart_color(label: str) -> str:
+    """Bar colour for a health label; Not Assessed is neutral grey, never red."""
+    if label == "Healthy":
+        return "#10b981"
+    if label == NOT_ASSESSED:
+        return "#9ca3af"
+    return "#ef4444"
+
+
+def summarize_batch_health(healthy: int, degraded: int, not_assessed: int) -> Dict[str, object]:
+    """Batch health summary computed over assessed clips only.
+
+    Not Assessed clips (e.g. anthrophony predictions) are never counted as
+    degraded. ``tone`` is one of: ``not_assessed``, ``good``, ``mixed``,
+    ``concern``.
+    """
+    assessed = healthy + degraded
+    if assessed == 0:
+        return {"assessed": 0, "healthy_ratio": None, "not_assessed": not_assessed,
+                "tone": NOT_ASSESSED.lower().replace(" ", "_")}
+    ratio = healthy / assessed
+    tone = "good" if ratio >= 0.8 else "mixed" if ratio >= 0.5 else "concern"
+    return {"assessed": assessed, "healthy_ratio": ratio, "not_assessed": not_assessed, "tone": tone}
