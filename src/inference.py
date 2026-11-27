@@ -1,60 +1,29 @@
 """
 Inference utilities for Acoustic Reef
- - Cached model/data loaders
- - Embedding resolution (precomputed vs runtime)
- - Dual predictions (health, noise)
+ - Data loaders
+ - Embedding resolution (precomputed vs runtime SurfPerch)
+ - Prediction (delegates to src.real_model_loader; no fallback classifiers)
  - UMAP transformation utilities
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any
 
 import numpy as np
 import pandas as pd
 import joblib
-import streamlit as st
 
 from src.models.surfperch_integration import SurfPerchModel
 from src.models.reef_classifier import (
     load_embeddings_from_csv,
 )
+from src.real_model_loader import RealPredictionResult, predict_with_real_model
 from src.utils import config
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
-
-
-def load_health_classifier():
-    """Load health classifier; fallback to legacy RF if dedicated model missing."""
-    try:
-        health_path = Path(config.HEALTH_CLASSIFIER_PATH)
-        if health_path.exists():
-            return joblib.load(health_path)
-    except Exception as e:
-        logger.warning(f"Could not load dedicated health classifier: {e}")
-
-    # Fallback to legacy single model (auto-resolved path)
-    try:
-        legacy = Path(config.RF_MODEL_PATH)
-        if legacy.exists():
-            return joblib.load(legacy)
-    except Exception as e:
-        logger.warning(f"Could not load legacy RF model: {e}")
-    
-    raise FileNotFoundError(
-        f"No health classifier found. Checked {config.HEALTH_CLASSIFIER_PATH} and {config.RF_MODEL_PATH}"
-    )
-
-
-def load_noise_classifier():
-    """Load noise classifier if available; return None if missing."""
-    noise_path = Path(config.NOISE_CLASSIFIER_PATH)
-    if noise_path.exists():
-        return joblib.load(noise_path)
-    return None
 
 
 def load_umap_model():
@@ -124,120 +93,19 @@ def find_embedding_for_filename(emb_df: pd.DataFrame, filename: str) -> Optional
 
 
 def compute_embedding_from_audio(audio_np: np.ndarray, sample_rate: int) -> np.ndarray:
-    try:
-        sp = get_surfperch_model()
-        processed = sp.preprocess_audio(audio_np, sample_rate)
-        emb = sp.generate_embeddings(processed, 32000)
-        return emb.reshape(1, -1) if emb.ndim == 2 else emb
-    except Exception as e:
-        logger.error(f"Error computing embedding from audio: {e}")
-        # Return a zero embedding as fallback or re-raise depending on requirements.
-        # Here we re-raise to alert the caller, but logged it first.
-        raise
+    """Compute a genuine SurfPerch embedding; raises SurfPerchError if impossible."""
+    sp = get_surfperch_model()
+    processed = sp.preprocess_audio(audio_np, sample_rate)
+    emb = sp.generate_embeddings(processed, 32000)
+    return emb.reshape(1, -1) if emb.ndim == 2 else emb
 
 
-@dataclass
-class PredictionResult:
-    health_label: str
-    health_conf: Optional[float]
-    noise_label: str
-    noise_conf: Optional[float]
-    feature_source: str
-    feature_dim: int
+PredictionResult = RealPredictionResult
 
 
-def predict_vital_signs(feature_vals: np.ndarray) -> PredictionResult:
-    """Predict vital signs using available models."""
-    try:
-        # Try to load dedicated classifiers first
-        health_model = load_health_classifier()
-        noise_model = load_noise_classifier()
-        
-        # Health prediction
-        health_pred = health_model.predict(feature_vals)
-        health_conf = None
-        if hasattr(health_model, "predict_proba"):
-            try:
-                health_conf = float(np.max(health_model.predict_proba(feature_vals)[0]))
-            except Exception:
-                health_conf = None
-        
-        # Robustly derive raw_pred using model's classes_ when available
-        classes = getattr(health_model, "classes_", None)
-        if isinstance(health_pred[0], (str, bytes)):
-            raw_pred = str(health_pred[0])
-        elif isinstance(health_pred[0], (int, np.integer)) and classes is not None and len(classes) > int(health_pred[0]) >= 0:
-            raw_pred = str(classes[int(health_pred[0])])
-        else:
-            # Fallback to probability argmax if available
-            if hasattr(health_model, "predict_proba"):
-                try:
-                    proba = health_model.predict_proba(feature_vals)[0]
-                    if classes is not None and len(proba) == len(classes):
-                        raw_pred = str(classes[int(np.argmax(proba))])
-                    else:
-                        raw_pred = "unknown"
-                except Exception:
-                    raw_pred = "unknown"
-            else:
-                raw_pred = "unknown"
-        
-        # Health assessment: healthy vs degraded (ignore anthrophony for health)
-        if raw_pred == "healthy":
-            health_label = "Healthy"
-        elif raw_pred == "degraded":
-            health_label = "Degraded"
-        else:  # anthrophony or unknown
-            health_label = "Degraded"  # Assume anthrophony indicates degraded health
-        
-        # Noise assessment: anthrophony vs others
-        if raw_pred == "anthrophony":
-            noise_label = "High"
-            # For anthrophony, use the probability of anthrophony class specifically
-            if hasattr(health_model, "predict_proba") and classes is not None:
-                try:
-                    proba = health_model.predict_proba(feature_vals)[0]
-                    cls_to_prob = {str(c): float(p) for c, p in zip(classes, proba)}
-                    noise_conf = cls_to_prob.get("anthrophony", health_conf if health_conf is not None else 0.8)
-                except Exception:
-                    noise_conf = health_conf if health_conf is not None else 0.8
-            else:
-                noise_conf = health_conf if health_conf is not None else 0.8
-        else:
-            noise_label = "Low"
-            # For non-anthrophony, use the probability of non-anthrophony classes
-            if hasattr(health_model, "predict_proba") and classes is not None:
-                try:
-                    proba = health_model.predict_proba(feature_vals)[0]
-                    cls_to_prob = {str(c): float(p) for c, p in zip(classes, proba)}
-                    # Sum probabilities of healthy + degraded (non-anthrophony)
-                    non_anthro_prob = cls_to_prob.get("healthy", 0) + cls_to_prob.get("degraded", 0)
-                    noise_conf = max(0.1, non_anthro_prob)  # Ensure minimum confidence
-                except Exception:
-                    noise_conf = health_conf if health_conf is not None else 0.8
-            else:
-                noise_conf = health_conf if health_conf is not None else 0.8
-
-        return PredictionResult(
-            health_label=health_label,
-            health_conf=health_conf,
-            noise_label=noise_label,
-            noise_conf=noise_conf,
-            feature_source="",
-            feature_dim=int(feature_vals.shape[1]),
-        )
-        
-    except Exception as e:
-        logger.error(f"Prediction failed: {e}")
-        # Return a safe fallback
-        return PredictionResult(
-            health_label="Unknown",
-            health_conf=None,
-            noise_label="Unknown", 
-            noise_conf=None,
-            feature_source="error",
-            feature_dim=int(feature_vals.shape[1]),
-        )
+def predict_vital_signs(feature_vals: np.ndarray) -> RealPredictionResult:
+    """Predict with the stored classifier. Raises on failure; never returns a fallback."""
+    return predict_with_real_model(feature_vals)
 
 
 def resolve_features_for_file(file_basename: str, audio_np: np.ndarray, sample_rate: int) -> Tuple[np.ndarray, str]:
@@ -253,18 +121,9 @@ def resolve_features_for_file(file_basename: str, audio_np: np.ndarray, sample_r
     if row is not None:
         return row.reshape(1, -1), f"precomputed embeddings match for '{file_basename}'"
 
-    # Try runtime embeddings; if TF is missing, insist on precomputed for accuracy
-    try:
-        import tensorflow as _tf  # noqa: F401
-        tf_available = True
-    except Exception:
-        tf_available = False
-    if not tf_available:
-        raise RuntimeError(
-            "No matching precomputed embedding found and TensorFlow is not available for real-time embeddings. "
-            "To get accurate results, upload a file present in embeddings.csv or enable TensorFlow."
-        )
-    return compute_embedding_from_audio(audio_np, sample_rate), "runtime-generated embeddings"
+    # No precomputed match: compute genuine SurfPerch embeddings. Raises a
+    # SurfPerchError (TensorFlow/model missing, invalid output) if that is not possible.
+    return compute_embedding_from_audio(audio_np, sample_rate), "runtime-generated SurfPerch embeddings"
 
 
 def transform_with_umap(feature_vals: np.ndarray) -> Optional[np.ndarray]:
