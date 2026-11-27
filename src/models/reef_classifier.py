@@ -108,6 +108,8 @@ class ReefClassifier:
         try:
             if embeddings is None or len(embeddings) == 0:
                 raise ValueError("Embeddings array is empty; provide training data before calling train().")
+            if not np.all(np.isfinite(np.asarray(embeddings, dtype=float))):
+                raise ValueError("Embeddings contain NaN or infinite values; refusing to train.")
             if len(health_labels) != len(embeddings) or len(anthro_labels) != len(embeddings):
                 raise ValueError(
                     "Label lengths do not match embeddings length: "
@@ -337,8 +339,8 @@ def load_embeddings_from_csv(csv_path: Optional[Path] = None) -> Tuple[np.ndarra
     # Sanity check: embedding dimension
     expected_dim = config.SURFPERCH_SETTINGS.get("embedding_dim", X.shape[1])
     if X.shape[1] != expected_dim:
-        logger.warning(
-            f"Embedding dim mismatch: CSV has {X.shape[1]}, expected {expected_dim}. Proceeding anyway."
+        raise ValueError(
+            f"Embedding dim mismatch: CSV has {X.shape[1]} numeric columns, expected {expected_dim}."
         )
     return X, df
 
@@ -350,6 +352,10 @@ def load_master_dataset(csv_path: Optional[Path] = None) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+class LabelAlignmentError(ValueError):
+    """Embeddings and labels cannot be joined safely."""
+
+
 def align_embeddings_and_labels(
     embeddings_df: pd.DataFrame,
     dataset_df: pd.DataFrame,
@@ -357,53 +363,69 @@ def align_embeddings_and_labels(
     label_columns: Optional[List[str]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
     """
-    Align embeddings with labels by joining on key columns.
+    Align embeddings with labels by joining on an explicit, stable key.
 
-    If key_columns are not provided, tries ['clip_id'] if present; otherwise falls back to positional alignment.
-    Returns (X, y, merged_df). If multiple label columns are provided, y will be a 2D array.
+    ``key_columns`` defaults to ["clip_id"] when both frames have it. There is
+    no positional fallback: without a usable key, or if the key is not unique
+    in both frames, or if any row on either side has no partner, a
+    LabelAlignmentError is raised.
+    Features are the embedding columns of ``embeddings_df`` only (label and
+    metadata columns from ``dataset_df`` are never used as features).
+    Returns (X, y, merged_df). If multiple label columns are provided, y is 2D.
     """
-    # Determine join keys
     if key_columns is None:
         if "clip_id" in embeddings_df.columns and "clip_id" in dataset_df.columns:
             key_columns = ["clip_id"]
         else:
-            key_columns = []
+            raise LabelAlignmentError(
+                "No key_columns given and no shared 'clip_id' column. Positional alignment is "
+                "not allowed; pass an explicit stable key such as key_columns=['filepath']."
+            )
+    for name, frame in (("embeddings", embeddings_df), ("labels", dataset_df)):
+        missing = [c for c in key_columns if c not in frame.columns]
+        if missing:
+            raise LabelAlignmentError(f"Key column(s) {missing} missing from {name} table")
+        if frame[key_columns].isna().any().any():
+            raise LabelAlignmentError(f"Key column(s) contain missing values in {name} table")
+        if frame.duplicated(subset=key_columns).any():
+            raise LabelAlignmentError(f"Key column(s) {key_columns} are not unique in {name} table")
 
-    # Determine label columns
     if label_columns is None:
-        # Heuristic: prefer common label names
-        candidate_labels = [
-            "health_label",
-            "reef_health",
-            "label",
-            "anthro_label",
-            "anthrophony",
-        ]
+        candidate_labels = ["health_label", "reef_health", "label", "anthro_label", "anthrophony"]
         label_columns = [c for c in candidate_labels if c in dataset_df.columns]
         if not label_columns:
-            # Fall back to any non-numeric columns that look categorical
             label_columns = [
                 c for c in dataset_df.columns
                 if dataset_df[c].dtype == object and c not in key_columns
             ][:1]
+    if not label_columns:
+        raise LabelAlignmentError("No label columns found in the labels table")
+    absent = [c for c in label_columns if c not in dataset_df.columns]
+    if absent:
+        raise LabelAlignmentError(f"Label column(s) {absent} missing from the labels table")
 
-    # Perform alignment
-    if key_columns:
-        merged = embeddings_df.merge(dataset_df, on=key_columns, how="inner")
-        feature_df = merged.select_dtypes(include=[np.number])
-        # Exclude label columns from features if they are numeric encoded
-        feature_df = feature_df.drop(columns=[c for c in label_columns if c in feature_df.columns], errors="ignore")
-        X = feature_df.to_numpy(dtype=np.float32)
-        y = merged[label_columns].to_numpy() if label_columns else np.array([])
-        return X, y, merged
+    emb_cols = [c for c in embeddings_df.columns if str(c).startswith("embedding_")]
+    if not emb_cols:
+        emb_cols = [
+            c for c in embeddings_df.select_dtypes(include=[np.number]).columns
+            if c not in key_columns and c not in label_columns
+        ]
+    if not emb_cols:
+        raise LabelAlignmentError("No embedding feature columns found")
 
-    # Positional fallback
-    logger.warning("No key columns for join; falling back to positional alignment.")
-    min_len = min(len(embeddings_df), len(dataset_df))
-    emb_feat = embeddings_df.select_dtypes(include=[np.number]).iloc[:min_len]
-    X = emb_feat.to_numpy(dtype=np.float32)
-    y = dataset_df.iloc[:min_len][label_columns].to_numpy() if label_columns else np.array([])
-    merged = pd.concat([embeddings_df.iloc[:min_len], dataset_df.iloc[:min_len].reset_index(drop=True)], axis=1)
+    dataset_cols = key_columns + [c for c in dataset_df.columns if c not in key_columns and c not in emb_cols]
+    merged = embeddings_df.merge(
+        dataset_df[dataset_cols], on=key_columns, how="inner", validate="one_to_one", suffixes=("", "_label")
+    )
+    if len(merged) != len(embeddings_df) or len(merged) != len(dataset_df):
+        raise LabelAlignmentError(
+            f"Join on {key_columns} is incomplete: embeddings={len(embeddings_df)}, "
+            f"labels={len(dataset_df)}, matched={len(merged)}"
+        )
+    X = merged[emb_cols].to_numpy(dtype=np.float32)
+    # A label column that also exists in the embeddings table is suffixed "_label" by the merge.
+    y_cols = [f"{c}_label" if (c in embeddings_df.columns and c not in key_columns) else c for c in label_columns]
+    y = merged[y_cols].to_numpy()
     return X, y, merged
 
 
