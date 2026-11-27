@@ -1,0 +1,9 @@
+# Test dependencies. Tests do not need TensorFlow or the SurfPerch download.
+# Versions of numpy/pandas/scikit-learn/joblib come from requirements.txt
+# (scikit-learn is pinned to 1.2.2 to match the stored classifier).
+pytest>=7.4
+numpy>=1.26,<2.0
+pandas>=2.0.0
+scikit-learn==1.2.2
+joblib>=1.3
+scipy>=1.11.0,<1.14

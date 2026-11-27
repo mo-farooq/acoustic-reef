@@ -1,255 +1,209 @@
 """
-SurfPerch model integration for Acoustic Reef
-Handles loading and using the Google SurfPerch model for audio embeddings
-"""
+SurfPerch model integration for Acoustic Reef.
 
+Loads the genuine Google SurfPerch TensorFlow SavedModel and produces audio
+embeddings. This module never fabricates embeddings: if TensorFlow or the
+model files are unavailable, loading raises a descriptive exception, and
+every embedding returned by ``generate_embeddings`` has been validated
+(2D, finite, expected dimension).
+"""
 import logging
-import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import numpy as np
+
 from src.utils import config
 
-# TensorFlow is optional at runtime. If unavailable, we fall back to a
-# lightweight placeholder so the app can still run in demo mode.
-try:
-    import tensorflow as tf  # type: ignore
-    TF_AVAILABLE = True
-except Exception:  # pragma: no cover - environment-dependent
-    tf = None  # type: ignore
-    TF_AVAILABLE = False
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+TARGET_SAMPLE_RATE = 32000
+# SurfPerch SavedModel input length (samples at 32 kHz).
+MODEL_INPUT_SAMPLES = 160000
+
+
+class SurfPerchError(RuntimeError):
+    """Base class for SurfPerch loading and inference errors."""
+
+
+class SurfPerchUnavailableError(SurfPerchError):
+    """TensorFlow is not importable, so the SavedModel cannot be used."""
+
+
+class SurfPerchModelNotFoundError(SurfPerchError):
+    """The SurfPerch SavedModel directory is missing or incomplete."""
+
+
+class SurfPerchLoadError(SurfPerchError):
+    """TensorFlow could not load the SavedModel (e.g. version mismatch)."""
+
+
+class InvalidEmbeddingError(SurfPerchError):
+    """The model output is not a valid embedding array."""
+
+
+def _import_tensorflow() -> Any:
+    """Import TensorFlow lazily. Raises SurfPerchUnavailableError if absent."""
+    try:
+        import tensorflow as tf  # type: ignore
+    except Exception as exc:
+        raise SurfPerchUnavailableError(
+            "TensorFlow could not be imported "
+            f"({type(exc).__name__}: {exc}). Genuine SurfPerch embeddings "
+            "cannot be produced without TensorFlow (requirements.txt pins "
+            "tensorflow==2.20.0). No placeholder embeddings are generated."
+        ) from exc
+    return tf
+
+
+def _expected_embedding_dim() -> int:
+    return int(config.SURFPERCH_SETTINGS.get("embedding_dim", 1280))
+
+
+def validate_embeddings(embeddings: Any, batch_size: Optional[int] = None,
+                        embedding_dim: Optional[int] = None) -> np.ndarray:
+    """Return embeddings as a float32 array or raise InvalidEmbeddingError."""
+    try:
+        arr = np.asarray(embeddings, dtype=np.float32)
+    except Exception as exc:
+        raise InvalidEmbeddingError(f"Model output is not numeric: {exc}") from exc
+    dim = _expected_embedding_dim() if embedding_dim is None else embedding_dim
+    if arr.ndim != 2:
+        raise InvalidEmbeddingError(f"Embedding must be 2D [batch, dim], got shape {arr.shape}")
+    if arr.shape[0] == 0 or arr.shape[1] != dim:
+        raise InvalidEmbeddingError(f"Expected embedding shape [n>0, {dim}], got {arr.shape}")
+    if batch_size is not None and arr.shape[0] != batch_size:
+        raise InvalidEmbeddingError(f"Expected batch size {batch_size}, got {arr.shape[0]}")
+    if not np.all(np.isfinite(arr)):
+        raise InvalidEmbeddingError("Embedding contains NaN or infinite values")
+    return arr
+
+
 class SurfPerchModel:
-    """
-    SurfPerch model wrapper for generating audio embeddings
-    """
-    
+    """Wrapper around the genuine SurfPerch SavedModel."""
+
     def __init__(self, model_path: Optional[str] = None):
         """
-        Initialize SurfPerch model
-        
         Args:
-            model_path: Path to saved SurfPerch model (if None, will download from Kaggle)
+            model_path: Directory of the SurfPerch SavedModel. Defaults to
+                config.SURFPERCH_SETTINGS["model_path"].
         """
         self.model_path = model_path or str(config.SURFPERCH_SETTINGS.get("model_path"))
         self.model = None
         self.is_loaded = False
-        
+
     def load_model(self) -> bool:
         """
-        Load the SurfPerch model
-        
-        Returns:
-            True if model loaded successfully, False otherwise
+        Load the SavedModel.
+
+        Returns True on success. Raises SurfPerchUnavailableError,
+        SurfPerchModelNotFoundError or SurfPerchLoadError otherwise; it never
+        substitutes a placeholder.
         """
+        path = Path(self.model_path) if self.model_path else None
+        if path is None or not path.is_dir() or not (path / "saved_model.pb").is_file():
+            raise SurfPerchModelNotFoundError(
+                f"SurfPerch SavedModel not found at '{self.model_path}' "
+                "(expected a directory containing saved_model.pb and variables/)."
+            )
+        tf = _import_tensorflow()
         try:
-            if self.model_path and os.path.exists(self.model_path) and TF_AVAILABLE:
-                # Load from local path using TensorFlow SavedModel
-                self.model = tf.saved_model.load(self.model_path)  # type: ignore[attr-defined]
-                logger.info(f"SurfPerch model loaded from {self.model_path}")
-            else:
-                if self.model_path and not os.path.exists(self.model_path):
-                    logger.warning(
-                        f"SurfPerch model path does not exist: {self.model_path}. Falling back to placeholder model."
-                    )
-                if not TF_AVAILABLE:
-                    logger.warning("TensorFlow not available. Using placeholder SurfPerch model.")
-                # Create a placeholder model that returns random embeddings
-                self.model = self._create_placeholder_model()
+            model = tf.saved_model.load(str(path))
+        except Exception as exc:
+            raise SurfPerchLoadError(
+                f"tf.saved_model.load failed for '{path}' with TensorFlow "
+                f"{getattr(tf, '__version__', 'unknown')}: {type(exc).__name__}: {exc}"
+            ) from exc
+        signatures = getattr(model, "signatures", None)
+        if not signatures or "serving_default" not in signatures:
+            raise SurfPerchLoadError(
+                f"SavedModel at '{path}' has no 'serving_default' signature; "
+                "it does not look like the expected SurfPerch export."
+            )
+        self.model = model
+        self.is_loaded = True
+        logger.info("SurfPerch model loaded from %s", path)
+        return True
 
-            self.is_loaded = True
-            return True
+    def generate_embeddings(self, audio_data: np.ndarray, sample_rate: int = TARGET_SAMPLE_RATE) -> np.ndarray:
+        """
+        Generate validated embeddings from audio sampled at 32 kHz.
 
-        except Exception as e:
-            logger.error(f"Error loading SurfPerch model: {e}")
-            return False
-    
-    def _create_placeholder_model(self):
-        """
-        Create a placeholder model for development
-        In production, this would be replaced with actual SurfPerch model
-        """
-        class PlaceholderModel:
-            def __call__(self, audio_input: np.ndarray):
-                # Accepts numpy arrays with shape [batch, time]
-                if hasattr(audio_input, "shape"):
-                    batch_size = audio_input.shape[0] if audio_input.ndim >= 2 else 1
-                else:
-                    batch_size = 1
-                embedding_dim = int(config.SURFPERCH_SETTINGS.get("embedding_dim", 512))
-                if TF_AVAILABLE:
-                    # Produce a TensorFlow tensor for consistent downstream behavior
-                    return tf.random.normal([batch_size, embedding_dim])  # type: ignore[attr-defined]
-                # Pure numpy fallback
-                return np.random.normal(size=(batch_size, embedding_dim)).astype(np.float32)
-        
-        return PlaceholderModel()
-    
-    def generate_embeddings(self, audio_data: np.ndarray, sample_rate: int = 32000) -> np.ndarray:
-        """
-        Generate embeddings from audio data using SurfPerch
-        
         Args:
-            audio_data: Audio array (1D or 2D)
-            sample_rate: Sample rate of the audio
-            
-        Returns:
-            Embeddings array
+            audio_data: 1D [time] or 2D [batch, time] float audio.
+            sample_rate: Must be 32000 (use preprocess_audio to resample).
+
+        Raises:
+            SurfPerchError subclasses on load or output problems.
         """
+        if sample_rate != TARGET_SAMPLE_RATE:
+            raise ValueError(f"SurfPerch requires {TARGET_SAMPLE_RATE} Hz audio, got {sample_rate}")
         if not self.is_loaded:
-            if not self.load_model():
-                raise RuntimeError("SurfPerch model not loaded")
-        
+            self.load_model()
+        audio = np.asarray(audio_data, dtype=np.float32)
+        if audio.size == 0:
+            raise ValueError("audio_data is empty")
+        if audio.ndim == 1:
+            audio = audio[np.newaxis, :]
+        if audio.ndim != 2:
+            raise ValueError(f"audio_data must be 1D or 2D, got shape {audio.shape}")
+        if audio.shape[1] < MODEL_INPUT_SAMPLES:
+            audio = np.pad(audio, ((0, 0), (0, MODEL_INPUT_SAMPLES - audio.shape[1])), mode="constant")
+        elif audio.shape[1] > MODEL_INPUT_SAMPLES:
+            audio = audio[:, :MODEL_INPUT_SAMPLES]
+
+        tf = _import_tensorflow()
         try:
-            # Ensure audio is [batch, time]
-            if audio_data.ndim == 1:
-                audio_data = np.expand_dims(audio_data, axis=0)
+            result = self.model.signatures["serving_default"](inputs=tf.constant(audio, dtype=tf.float32))
+        except Exception as exc:
+            raise SurfPerchError(f"SurfPerch inference call failed: {type(exc).__name__}: {exc}") from exc
+        if not isinstance(result, dict) or "embedding" not in result:
+            keys = list(result.keys()) if isinstance(result, dict) else type(result).__name__
+            raise InvalidEmbeddingError(f"SurfPerch output has no 'embedding' entry (got {keys})")
+        embedding = result["embedding"]
+        if hasattr(embedding, "numpy"):
+            embedding = embedding.numpy()
+        return validate_embeddings(embedding, batch_size=audio.shape[0])
 
-            if TF_AVAILABLE and self._is_tf_model(self.model):
-                # SurfPerch expects exactly 160000 samples (about 7.3 seconds at 22kHz)
-                target_length = 160000
-                if len(audio_data[0]) != target_length:
-                    # Pad or truncate to exact length
-                    if len(audio_data[0]) < target_length:
-                        # Pad with zeros
-                        padding = target_length - len(audio_data[0])
-                        audio_data = np.pad(audio_data, ((0, 0), (0, padding)), mode='constant')
-                    else:
-                        # Truncate
-                        audio_data = audio_data[:, :target_length]
-                
-                audio_tensor = tf.constant(audio_data, dtype=tf.float32)  # type: ignore[name-defined]
-                
-                # Use the serving_default signature with keyword arguments
-                try:
-                    logger.info("Calling SurfPerch with serving_default signature")
-                    result = self.model.signatures["serving_default"](inputs=audio_tensor)
-                    
-                    # Extract the embedding from the result dictionary
-                    if isinstance(result, dict) and "embedding" in result:
-                        embeddings = result["embedding"]
-                        logger.info(f"Successfully extracted embedding with shape: {embeddings.shape}")
-                    else:
-                        raise RuntimeError(f"Unexpected result format: {type(result)}")
-                        
-                except Exception as e:
-                    logger.error(f"SurfPerch model call failed: {e}")
-                    raise RuntimeError(f"Could not call SurfPerch model: {e}")
-                
-                # Handle different output formats
-                if isinstance(embeddings, dict):
-                    # If it returns a dict, take the first tensor value
-                    embeddings = next(iter(embeddings.values()))
-                elif hasattr(embeddings, "numpy"):
-                    # Convert TensorFlow tensor to numpy
-                    embeddings = embeddings.numpy()
-                elif not isinstance(embeddings, np.ndarray):
-                    # Try to convert to numpy array
-                    embeddings = np.array(embeddings)
-            else:
-                # Placeholder or numpy-compatible path
-                embeddings = self.model(audio_data)
-
-            logger.info(f"Generated embeddings: {np.shape(embeddings)}")
-            return np.asarray(embeddings)
-
-        except Exception as e:
-            logger.error(f"Error generating embeddings: {e}")
-            raise
-
-    @staticmethod
-    def _is_tf_model(model: Any) -> bool:
-        """Best-effort check if the loaded model is a TF callable."""
-        if not TF_AVAILABLE:
-            return False
-        # SavedModel callables expose .signatures or are callable with tensors
-        return hasattr(model, "signatures") or callable(model)
-    
     def preprocess_audio(self, audio_data: np.ndarray, sample_rate: int) -> np.ndarray:
+        """Resample to 32 kHz, peak-normalise and pad to at least one second.
+
+        Raises RuntimeError if resampling is required but librosa is missing.
         """
-        Preprocess audio for SurfPerch model
-        
-        Args:
-            audio_data: Raw audio data
-            sample_rate: Original sample rate
-            
-        Returns:
-            Preprocessed audio data
-        """
-        try:
-            # Resample if necessary (SurfPerch expects 32kHz)
-            target_sr = 32000
-            if sample_rate != target_sr:
-                try:
-                    import librosa  # type: ignore
-                    audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=target_sr)
-                except Exception:
-                    # If librosa is not available, skip resampling with a warning.
-                    logger.warning(
-                        "librosa not available for resampling; proceeding without resample. Results may vary."
-                    )
-                    target_sr = sample_rate
+        audio_data = np.asarray(audio_data, dtype=np.float32)
+        if audio_data.size == 0:
+            raise ValueError("audio_data is empty")
+        if sample_rate != TARGET_SAMPLE_RATE:
+            try:
+                import librosa  # type: ignore
+            except Exception as exc:
+                raise RuntimeError(
+                    f"librosa is required to resample {sample_rate} Hz audio to {TARGET_SAMPLE_RATE} Hz"
+                ) from exc
+            audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=TARGET_SAMPLE_RATE)
+        max_abs = np.max(np.abs(audio_data))
+        if max_abs > 0:
+            audio_data = audio_data / max_abs
+        min_length = TARGET_SAMPLE_RATE  # 1 second
+        if len(audio_data) < min_length:
+            audio_data = np.pad(audio_data, (0, min_length - len(audio_data)), mode="constant")
+        return audio_data
 
-            # Normalize audio safely
-            max_abs = np.max(np.abs(audio_data)) if np.size(audio_data) > 0 else 1.0
-            if max_abs > 0:
-                audio_data = audio_data / max_abs
-
-            # Ensure minimum length (SurfPerch expects certain minimum duration)
-            min_length = int(target_sr * 1.0)  # 1 second minimum
-            if len(audio_data) < min_length:
-                audio_data = np.pad(audio_data, (0, min_length - len(audio_data)), mode="constant")
-
-            return audio_data
-
-        except Exception as e:
-            logger.error(f"Error preprocessing audio: {e}")
-            raise
-    
     def batch_generate_embeddings(self, audio_batch: np.ndarray, sample_rates: np.ndarray) -> np.ndarray:
-        """
-        Generate embeddings for a batch of audio files
-        
-        Args:
-            audio_batch: Batch of audio arrays
-            sample_rates: Corresponding sample rates
-            
-        Returns:
-            Batch of embeddings
-        """
-        try:
-            embeddings_list = []
-            
-            for i, (audio, sr) in enumerate(zip(audio_batch, sample_rates)):
-                # Preprocess audio
-                processed_audio = self.preprocess_audio(audio, sr)
-                
-                # Generate embeddings
-                embeddings = self.generate_embeddings(processed_audio, 32000)
-                embeddings_list.append(embeddings[0])  # Remove batch dimension
-            
-            return np.array(embeddings_list)
-            
-        except Exception as e:
-            logger.error(f"Error in batch embedding generation: {e}")
-            raise
-    
+        """Generate one validated embedding per audio array."""
+        embeddings_list = []
+        for audio, sr in zip(audio_batch, sample_rates):
+            processed = self.preprocess_audio(audio, sr)
+            embeddings = self.generate_embeddings(processed, TARGET_SAMPLE_RATE)
+            embeddings_list.append(embeddings[0])
+        return np.array(embeddings_list)
+
     def get_model_info(self) -> Dict[str, Any]:
-        """
-        Get information about the loaded model
-        
-        Returns:
-            Dictionary with model information
-        """
+        """Describe the wrapper state (is_loaded is True only for a real SavedModel)."""
         return {
-            'is_loaded': self.is_loaded,
-            'model_path': self.model_path,
-            'model_type': 'SurfPerch',
-            'embedding_dim': int(config.SURFPERCH_SETTINGS.get("embedding_dim", 512)),
-            'target_sample_rate': 32000
+            "is_loaded": self.is_loaded,
+            "model_path": self.model_path,
+            "model_type": "SurfPerch (TensorFlow SavedModel)",
+            "embedding_dim": _expected_embedding_dim(),
+            "target_sample_rate": TARGET_SAMPLE_RATE,
         }
